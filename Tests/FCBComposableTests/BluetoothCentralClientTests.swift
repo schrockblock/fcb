@@ -189,3 +189,55 @@ struct BluetoothCentralClientDiscoveryTests {
         #expect(services.isEmpty)
     }
 }
+
+@MainActor
+struct BluetoothCentralClientReadWriteTests {
+    @Test func writeValueResolvesWhenDelegateFires() async throws {
+        let fake = FakeCentralManager()
+        let actor = CentralActor(manager: fake)
+        let pid = UUID()
+        let cid = CBUUID(string: "2A19")
+        let fakeConn = FakePeripheralConnection(identifier: pid)
+        await actor.injectPeripheralForTest(id: pid, connection: fakeConn)
+        await actor.injectCharacteristicForTest(peripheralID: pid, characteristicID: cid)
+
+        let task = Task { try await actor.writeValue(data: Data([0x01]), peripheralID: pid, characteristicID: cid, type: .withResponse) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(fakeConn.writeCalls.count == 1)
+        await actor.completeWriteForTest(peripheralID: pid, characteristicID: cid, error: nil)
+        try await task.value
+    }
+
+    @Test func setNotifyResolvesWhenDelegateFires() async throws {
+        let fake = FakeCentralManager()
+        let actor = CentralActor(manager: fake)
+        let pid = UUID()
+        let cid = CBUUID(string: "2A19")
+        let fakeConn = FakePeripheralConnection(identifier: pid)
+        await actor.injectPeripheralForTest(id: pid, connection: fakeConn)
+        await actor.injectCharacteristicForTest(peripheralID: pid, characteristicID: cid)
+
+        let task = Task { try await actor.setNotify(enabled: true, peripheralID: pid, characteristicID: cid) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(fakeConn.notifyCalls.count == 1)
+        await actor.completeNotifyForTest(peripheralID: pid, characteristicID: cid, error: nil)
+        try await task.value
+    }
+
+    @Test func notificationsStreamYieldsValues() async throws {
+        let fake = FakeCentralManager()
+        let actor = CentralActor(manager: fake)
+        let pid = UUID()
+        let cid = CBUUID(string: "2A19")
+        let fakeConn = FakePeripheralConnection(identifier: pid)
+        await actor.injectPeripheralForTest(id: pid, connection: fakeConn)
+        await actor.injectCharacteristicForTest(peripheralID: pid, characteristicID: cid)
+
+        let stream = actor.notifications(peripheralID: pid, characteristicID: cid)
+        var iter = stream.makeAsyncIterator()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await actor.simulateNotificationValueForTest(peripheralID: pid, characteristicID: cid, data: Data([0xAA]))
+        let next = try await iter.next()
+        #expect(next == Data([0xAA]))
+    }
+}
