@@ -59,49 +59,108 @@ final actor CentralActor {
 
     private func wireDelegates() {
         manager.delegate = delegate
-        // Handlers are nonisolated stubs — call them directly. Tasks 15-18 will
-        // replace these with actor-hopping Task { await self?.handle…() } calls
-        // once the bodies need actor state.
-        delegate.onDidUpdateState = { [weak self] m in
-            self?.handleDidUpdateState(m.state)
+        // Capture manager as nonisolated(unsafe) so the @Sendable closure can read
+        // `state` synchronously. This is safe: manager is a let, `state` is read-only,
+        // and FakeCentralManager sets state before firing the delegate.
+        nonisolated(unsafe) let mgr: any CentralManaging = manager
+        delegate.onDidUpdateState = { [weak self] _ in
+            // Read state from the captured manager reference rather than from the
+            // CBCentralManager argument (which may be an unsafeBitCast'd fake in tests).
+            let state = mgr.state
+            Task { await self?.handleDidUpdateState(state) }
         }
-        delegate.onDidDiscover = { [weak self] _, peripheral, ad, rssi in
-            self?.handleDidDiscover(peripheral: peripheral, ad: ad, rssi: rssi)
+        delegate.onDidDiscover = { [weak self] _, cbPeripheral, ad, rssi in
+            let advertisementData = AdvertisementData(dictionary: ad)
+            let rssiInt = rssi.intValue
+            Task { await self?.recordDiscoveredPeripheral(cbPeripheral: cbPeripheral, ad: advertisementData, rssi: rssiInt) }
         }
-        delegate.onDidConnect = { [weak self] _, peripheral in
-            self?.handleDidConnect(peripheral: peripheral)
+        delegate.onDidConnect = { [weak self] _, cbPeripheral in
+            Task { await self?.handleDidConnect(cbPeripheral: cbPeripheral) }
         }
-        delegate.onDidFailToConnect = { [weak self] _, peripheral, error in
-            self?.handleDidFailToConnect(peripheral: peripheral, error: error)
+        delegate.onDidFailToConnect = { [weak self] _, cbPeripheral, error in
+            let nsError = error.map { $0 as NSError }
+            Task { await self?.handleDidFailToConnect(cbPeripheral: cbPeripheral, nsError: nsError) }
         }
-        delegate.onDidDisconnect = { [weak self] _, peripheral, error in
-            self?.handleDidDisconnect(peripheral: peripheral, error: error)
+        delegate.onDidDisconnect = { [weak self] _, cbPeripheral, error in
+            let nsError = error.map { $0 as NSError }
+            Task { await self?.handleDidDisconnect(cbPeripheral: cbPeripheral, nsError: nsError) }
         }
         peripheralDelegate.onDidDiscoverServices = { [weak self] peripheral, error in
-            self?.handleDidDiscoverServices(peripheral: peripheral, error: error)
+            let id = peripheral.identifier
+            let services = peripheral.services?.map(Service.init) ?? []
+            let nsError = error.map { $0 as NSError }
+            Task { await self?.handleDidDiscoverServices(id: id, services: services, nsError: nsError) }
         }
         peripheralDelegate.onDidDiscoverCharacteristics = { [weak self] peripheral, service, error in
-            self?.handleDidDiscoverCharacteristics(peripheral: peripheral, service: service, error: error)
+            let pid = peripheral.identifier
+            let sid = service.uuid
+            let chars = service.characteristics?.map(Characteristic.init) ?? []
+            let nsError = error.map { $0 as NSError }
+            Task { await self?.handleDidDiscoverCharacteristics(peripheralID: pid, serviceID: sid, characteristics: chars, nsError: nsError) }
         }
         peripheralDelegate.onDidUpdateValueForCharacteristic = { [weak self] peripheral, char, error in
-            self?.handleDidUpdateValue(peripheral: peripheral, characteristic: char, error: error)
+            let pid = peripheral.identifier
+            let cid = char.uuid
+            let data = char.value
+            let nsError = error.map { $0 as NSError }
+            Task { await self?.handleDidUpdateValue(peripheralID: pid, characteristicID: cid, data: data, nsError: nsError) }
         }
         peripheralDelegate.onDidWriteValueForCharacteristic = { [weak self] peripheral, char, error in
-            self?.handleDidWriteValue(peripheral: peripheral, characteristic: char, error: error)
+            let pid = peripheral.identifier
+            let cid = char.uuid
+            let nsError = error.map { $0 as NSError }
+            Task { await self?.handleDidWriteValue(peripheralID: pid, characteristicID: cid, nsError: nsError) }
         }
         peripheralDelegate.onDidUpdateNotificationState = { [weak self] peripheral, char, error in
-            self?.handleDidUpdateNotificationState(peripheral: peripheral, characteristic: char, error: error)
+            let pid = peripheral.identifier
+            let cid = char.uuid
+            let nsError = error.map { $0 as NSError }
+            Task { await self?.handleDidUpdateNotificationState(peripheralID: pid, characteristicID: cid, nsError: nsError) }
         }
     }
 
-    // MARK: - Public methods (stubs filled in by later tasks)
+    // MARK: - Public stream methods
 
-    nonisolated func stateStream() -> AsyncStream<CBManagerState> { .never }
-    nonisolated func eventStream() -> AsyncStream<CentralEvent> { .never }
-    nonisolated func scan(services: [CBUUID]?, options: ScanOptions?) -> AsyncStream<DiscoveredPeripheral> { .never }
+    nonisolated func stateStream() -> AsyncStream<CBManagerState> {
+        AsyncStream<CBManagerState> { continuation in
+            let token = UUID()
+            Task { await self.registerStateContinuation(token, continuation: continuation) }
+            continuation.onTermination = { _ in
+                Task { await self.unregisterStateContinuation(token) }
+            }
+        }
+    }
+
+    nonisolated func eventStream() -> AsyncStream<CentralEvent> {
+        AsyncStream<CentralEvent> { continuation in
+            let token = UUID()
+            Task { await self.registerEventContinuation(token, continuation: continuation) }
+            continuation.onTermination = { _ in
+                Task { await self.unregisterEventContinuation(token) }
+            }
+        }
+    }
+
+    nonisolated func scan(services: [CBUUID]?, options: ScanOptions?) -> AsyncStream<DiscoveredPeripheral> {
+        // Wrap in a sendable box so the values can cross actor boundaries under Swift 6.
+        nonisolated(unsafe) let servicesCopy: [CBUUID]? = services.map { Array($0) }
+        nonisolated(unsafe) let optionsCopy = options
+        return AsyncStream<DiscoveredPeripheral> { continuation in
+            Task { await self.startScan(services: servicesCopy, options: optionsCopy, continuation: continuation) }
+            continuation.onTermination = { _ in
+                Task { await self.endScan() }
+            }
+        }
+    }
+
     nonisolated func notifications(peripheralID: UUID, characteristicID: CBUUID) -> AsyncThrowingStream<Data, any Error> { .finished() }
 
-    nonisolated func stopScan() async {}
+    func stopScan() async {
+        manager.stopScan()
+        scanContinuation?.finish()
+        scanContinuation = nil
+    }
+
     nonisolated func connect(id: UUID, options: ConnectOptions?) async throws -> Peripheral { throw BluetoothError.poweredOff }
     nonisolated func disconnect(id: UUID) async throws { throw BluetoothError.poweredOff }
     nonisolated func retrievePeripherals(ids: [UUID]) async -> [Peripheral] { [] }
@@ -112,19 +171,147 @@ final actor CentralActor {
     nonisolated func writeValue(data: Data, peripheralID: UUID, characteristicID: CBUUID, type: CBCharacteristicWriteType) async throws { throw BluetoothError.poweredOff }
     nonisolated func setNotify(enabled: Bool, peripheralID: UUID, characteristicID: CBUUID) async throws { throw BluetoothError.poweredOff }
 
-    // MARK: - Delegate handlers (filled in by later tasks)
-    // nonisolated stubs: the bodies are empty and don't access actor state, so
-    // nonisolated avoids strict-concurrency errors when bridging non-Sendable
-    // CB types from synchronous delegate callbacks. Tasks 15-18 will refactor.
+    // MARK: - Private actor-isolated registration helpers
 
-    nonisolated func handleDidUpdateState(_ state: CBManagerState) {}
-    nonisolated func handleDidDiscover(peripheral: CBPeripheral, ad: [String: Any], rssi: NSNumber) {}
-    nonisolated func handleDidConnect(peripheral: CBPeripheral) {}
-    nonisolated func handleDidFailToConnect(peripheral: CBPeripheral, error: (any Error)?) {}
-    nonisolated func handleDidDisconnect(peripheral: CBPeripheral, error: (any Error)?) {}
-    nonisolated func handleDidDiscoverServices(peripheral: CBPeripheral, error: (any Error)?) {}
-    nonisolated func handleDidDiscoverCharacteristics(peripheral: CBPeripheral, service: CBService, error: (any Error)?) {}
-    nonisolated func handleDidUpdateValue(peripheral: CBPeripheral, characteristic: CBCharacteristic, error: (any Error)?) {}
-    nonisolated func handleDidWriteValue(peripheral: CBPeripheral, characteristic: CBCharacteristic, error: (any Error)?) {}
-    nonisolated func handleDidUpdateNotificationState(peripheral: CBPeripheral, characteristic: CBCharacteristic, error: (any Error)?) {}
+    private func registerStateContinuation(_ token: UUID, continuation: AsyncStream<CBManagerState>.Continuation) {
+        stateContinuations[token] = continuation
+    }
+
+    private func unregisterStateContinuation(_ token: UUID) {
+        stateContinuations.removeValue(forKey: token)
+    }
+
+    private func registerEventContinuation(_ token: UUID, continuation: AsyncStream<CentralEvent>.Continuation) {
+        eventContinuations[token] = continuation
+    }
+
+    private func unregisterEventContinuation(_ token: UUID) {
+        eventContinuations.removeValue(forKey: token)
+    }
+
+    private func startScan(services: [CBUUID]?, options: ScanOptions?, continuation: AsyncStream<DiscoveredPeripheral>.Continuation) {
+        scanContinuation = continuation
+        manager.scanForPeripherals(withServices: services, options: options?.dictionary)
+    }
+
+    private func endScan() {
+        manager.stopScan()
+        scanContinuation = nil
+    }
+
+    private func emit(_ event: CentralEvent) {
+        for cont in eventContinuations.values { cont.yield(event) }
+    }
+
+    // MARK: - Delegate handlers (actor-isolated)
+
+    private func handleDidUpdateState(_ state: CBManagerState) {
+        for cont in stateContinuations.values { cont.yield(state) }
+        emit(.didUpdateState(state))
+    }
+
+    private func recordDiscoveredPeripheral(cbPeripheral: CBPeripheral, ad: AdvertisementData, rssi: Int) {
+        let id = cbPeripheral.identifier
+        let peripheral = Peripheral(cbPeripheral)
+        peripherals[id] = cbPeripheral
+        let discovered = DiscoveredPeripheral(peripheral: peripheral, advertisementData: ad, rssi: rssi)
+        scanContinuation?.yield(discovered)
+        emit(.didDiscover(discovered))
+    }
+
+    private func handleDidConnect(cbPeripheral: CBPeripheral) {
+        let id = cbPeripheral.identifier
+        let peripheral = Peripheral(cbPeripheral)
+        peripherals[id] = cbPeripheral
+        cbPeripheral.delegate = peripheralDelegate
+        emit(.didConnect(peripheral))
+        if let cont = pendingConnect.removeValue(forKey: id) {
+            cont.resume(returning: peripheral)
+        }
+    }
+
+    private func handleDidFailToConnect(cbPeripheral: CBPeripheral, nsError: NSError?) {
+        let id = cbPeripheral.identifier
+        let peripheral = Peripheral(cbPeripheral)
+        let err = BluetoothError.connectionFailed(peripheralID: id, underlying: nsError)
+        emit(.didFailToConnect(peripheral, err))
+        if let cont = pendingConnect.removeValue(forKey: id) {
+            cont.resume(throwing: err)
+        }
+    }
+
+    private func handleDidDisconnect(cbPeripheral: CBPeripheral, nsError: NSError?) {
+        let id = cbPeripheral.identifier
+        let peripheral = Peripheral(cbPeripheral)
+        peripherals.removeValue(forKey: id)
+        let btError = nsError.map { BluetoothError.disconnected(peripheralID: id, underlying: $0) }
+        emit(.didDisconnect(peripheral, btError))
+        if let cont = pendingDisconnect.removeValue(forKey: id) {
+            if let btError {
+                cont.resume(throwing: btError)
+            } else {
+                cont.resume()
+            }
+        }
+    }
+
+    private func handleDidDiscoverServices(id: UUID, services: [Service], nsError: NSError?) {
+        if let cont = pendingDiscoverServices.removeValue(forKey: id) {
+            if let nsError {
+                cont.resume(throwing: BluetoothError(nsError))
+            } else {
+                cont.resume(returning: services)
+            }
+        }
+    }
+
+    private func handleDidDiscoverCharacteristics(peripheralID: UUID, serviceID: CBUUID, characteristics: [Characteristic], nsError: NSError?) {
+        let key = "\(peripheralID)/\(serviceID)"
+        if let cont = pendingDiscoverCharacteristics.removeValue(forKey: key) {
+            if let nsError {
+                cont.resume(throwing: BluetoothError(nsError))
+            } else {
+                cont.resume(returning: characteristics)
+            }
+        }
+    }
+
+    private func handleDidUpdateValue(peripheralID: UUID, characteristicID: CBUUID, data: Data?, nsError: NSError?) {
+        let key = "\(peripheralID)/\(characteristicID)"
+        if let nsError {
+            let err = BluetoothError(nsError)
+            if let cont = pendingReads.removeValue(forKey: key) {
+                cont.resume(throwing: err)
+            }
+            notificationContinuations[key]?.yield(with: .failure(err))
+        } else if let data {
+            if let cont = pendingReads.removeValue(forKey: key) {
+                cont.resume(returning: data)
+            } else {
+                notificationContinuations[key]?.yield(data)
+            }
+        }
+    }
+
+    private func handleDidWriteValue(peripheralID: UUID, characteristicID: CBUUID, nsError: NSError?) {
+        let key = "\(peripheralID)/\(characteristicID)"
+        if let cont = pendingWrites.removeValue(forKey: key) {
+            if let nsError {
+                cont.resume(throwing: BluetoothError(nsError))
+            } else {
+                cont.resume()
+            }
+        }
+    }
+
+    private func handleDidUpdateNotificationState(peripheralID: UUID, characteristicID: CBUUID, nsError: NSError?) {
+        let key = "\(peripheralID)/\(characteristicID)"
+        if let cont = pendingNotify.removeValue(forKey: key) {
+            if let nsError {
+                cont.resume(throwing: BluetoothError(nsError))
+            } else {
+                cont.resume()
+            }
+        }
+    }
 }
