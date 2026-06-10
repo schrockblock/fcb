@@ -3,6 +3,22 @@ import ComposableArchitecture
 import FCB
 import Foundation
 
+/// Thread-safe storage for CBATTRequest objects keyed by UUID.
+/// CBATTRequest is not Sendable, so we isolate access behind a lock
+/// and declare @unchecked Sendable since all access is synchronized.
+private final class ATTRequestStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [UUID: CBATTRequest] = [:]
+
+    func store(_ request: CBATTRequest, for id: UUID) {
+        lock.withLock { storage[id] = request }
+    }
+
+    func remove(for id: UUID) -> CBATTRequest? {
+        lock.withLock { storage.removeValue(forKey: id) }
+    }
+}
+
 extension BluetoothPeripheralClient: DependencyKey {
     public static let liveValue: BluetoothPeripheralClient = {
         let actor = PeripheralRoleActor(manager: CBPeripheralManager(delegate: nil, queue: nil))
@@ -32,10 +48,12 @@ extension BluetoothPeripheralClient: DependencyKey {
 final actor PeripheralRoleActor {
     private let manager: any PeripheralManaging
     private let delegate = FCBPeripheralManagerDelegate()
+    // CBATTRequest is not Sendable; we store it outside actor isolation in a
+    // lock-protected store so it can be captured safely across task boundaries.
+    private let attRequestStore = ATTRequestStore()
 
     private var services: [CBUUID: CBMutableService] = [:]
     private var characteristics: [CBUUID: CBMutableCharacteristic] = [:]
-    private var pendingRequests: [UUID: CBATTRequest] = [:]
     private var centrals: [UUID: CBCentral] = [:]
 
     private var stateContinuations: [UUID: AsyncStream<CBManagerState>.Continuation] = [:]
@@ -74,6 +92,39 @@ final actor PeripheralRoleActor {
             let nsError = error as NSError?
             Task { await self?.handleDidStartAdvertising(error: nsError) }
         }
+        delegate.onDidReceiveRead = { [weak self] _, cbReq in
+            guard let self else { return }
+            let id = UUID()
+            self.attRequestStore.store(cbReq, for: id)
+            let centralValue = Central(cbReq.central)
+            let characteristicValue = Characteristic(cbReq.characteristic)
+            let offset = cbReq.offset
+            Task { await self.handleDidReceiveRead(id: id, central: centralValue, characteristic: characteristicValue, offset: offset) }
+        }
+        delegate.onDidReceiveWrite = { [weak self] _, cbRequests in
+            guard let self else { return }
+            var items: [(id: UUID, central: Central, characteristic: Characteristic, offset: Int, value: Data?)] = []
+            for req in cbRequests {
+                let id = UUID()
+                self.attRequestStore.store(req, for: id)
+                items.append((id, Central(req.central), Characteristic(req.characteristic), req.offset, req.value))
+            }
+            Task { await self.handleDidReceiveWrite(items: items) }
+        }
+        delegate.onDidSubscribeToCharacteristic = { [weak self] _, cbCentral, cbCharacteristic in
+            let central = Central(cbCentral)
+            let characteristic = Characteristic(cbCharacteristic)
+            let centralID = central.id
+            Task { await self?.handleDidSubscribe(centralID: centralID, cbCentral: cbCentral, central: central, characteristic: characteristic) }
+        }
+        delegate.onDidUnsubscribeFromCharacteristic = { [weak self] _, cbCentral, cbCharacteristic in
+            let central = Central(cbCentral)
+            let characteristic = Characteristic(cbCharacteristic)
+            Task { await self?.handleDidUnsubscribe(central: central, characteristic: characteristic) }
+        }
+        delegate.onIsReadyToUpdateSubscribers = { [weak self] _ in
+            Task { await self?.handleIsReadyToUpdateSubscribers() }
+        }
     }
 
     // MARK: - State and event streams
@@ -94,11 +145,31 @@ final actor PeripheralRoleActor {
         }
     }
 
-    // MARK: - Read/write/subscription streams (stubs for Tasks 22-23)
+    // MARK: - Read/write/subscription streams
 
-    nonisolated func readRequestsStream() -> AsyncStream<ReadRequest> { .never }
-    nonisolated func writeRequestsStream() -> AsyncStream<[WriteRequest]> { .never }
-    nonisolated func subscriptionsStream() -> AsyncStream<SubscriptionEvent> { .never }
+    nonisolated func readRequestsStream() -> AsyncStream<ReadRequest> {
+        AsyncStream<ReadRequest> { continuation in
+            let token = UUID()
+            Task { await self.registerReadRequestContinuation(token, continuation: continuation) }
+            continuation.onTermination = { _ in Task { await self.unregisterReadRequestContinuation(token) } }
+        }
+    }
+
+    nonisolated func writeRequestsStream() -> AsyncStream<[WriteRequest]> {
+        AsyncStream<[WriteRequest]> { continuation in
+            let token = UUID()
+            Task { await self.registerWriteRequestContinuation(token, continuation: continuation) }
+            continuation.onTermination = { _ in Task { await self.unregisterWriteRequestContinuation(token) } }
+        }
+    }
+
+    nonisolated func subscriptionsStream() -> AsyncStream<SubscriptionEvent> {
+        AsyncStream<SubscriptionEvent> { continuation in
+            let token = UUID()
+            Task { await self.registerSubscriptionContinuation(token, continuation: continuation) }
+            continuation.onTermination = { _ in Task { await self.unregisterSubscriptionContinuation(token) } }
+        }
+    }
 
     // MARK: - Service management
 
@@ -158,10 +229,21 @@ final actor PeripheralRoleActor {
         return dict
     }
 
-    // MARK: - Other stubs (filled in by Task 23)
+    // MARK: - Respond and updateValue
 
-    nonisolated func respond(requestID: UUID, result: CBATTError.Code) async {}
-    nonisolated func updateValue(data: Data, characteristicID: CBUUID, centralIDs: [UUID]?) async throws { throw BluetoothError.poweredOff }
+    func respond(requestID: UUID, result: CBATTError.Code) async {
+        guard let cbReq = attRequestStore.remove(for: requestID) else { return }
+        manager.respond(to: cbReq, withResult: result)
+    }
+
+    func updateValue(data: Data, characteristicID: CBUUID, centralIDs: [UUID]?) async throws {
+        try preflightCheck()
+        guard let char = characteristics[characteristicID] else {
+            throw BluetoothError.unknownCharacteristic(characteristicID, serviceID: CBUUID())
+        }
+        let cbCentrals: [CBCentral]? = centralIDs?.compactMap { centrals[$0] }
+        _ = manager.updateValue(data, for: char, onSubscribedCentrals: cbCentrals)
+    }
 
     // MARK: - Private registration helpers
 
@@ -176,6 +258,24 @@ final actor PeripheralRoleActor {
     }
     private func unregisterEventContinuation(_ token: UUID) {
         eventContinuations.removeValue(forKey: token)
+    }
+    private func registerReadRequestContinuation(_ token: UUID, continuation: AsyncStream<ReadRequest>.Continuation) {
+        readRequestContinuations[token] = continuation
+    }
+    private func unregisterReadRequestContinuation(_ token: UUID) {
+        readRequestContinuations.removeValue(forKey: token)
+    }
+    private func registerWriteRequestContinuation(_ token: UUID, continuation: AsyncStream<[WriteRequest]>.Continuation) {
+        writeRequestContinuations[token] = continuation
+    }
+    private func unregisterWriteRequestContinuation(_ token: UUID) {
+        writeRequestContinuations.removeValue(forKey: token)
+    }
+    private func registerSubscriptionContinuation(_ token: UUID, continuation: AsyncStream<SubscriptionEvent>.Continuation) {
+        subscriptionContinuations[token] = continuation
+    }
+    private func unregisterSubscriptionContinuation(_ token: UUID) {
+        subscriptionContinuations.removeValue(forKey: token)
     }
     private func emit(_ event: PeripheralManagerEvent) {
         for cont in eventContinuations.values { cont.yield(event) }
@@ -224,9 +324,44 @@ final actor PeripheralRoleActor {
         }
     }
 
+    func handleDidReceiveRead(id: UUID, central: Central, characteristic: Characteristic, offset: Int) {
+        let mapped = ReadRequest(id: id, central: central, characteristic: characteristic, offset: offset)
+        for cont in readRequestContinuations.values { cont.yield(mapped) }
+        emit(.didReceiveRead(mapped))
+    }
+
+    func handleDidReceiveWrite(items: [(id: UUID, central: Central, characteristic: Characteristic, offset: Int, value: Data?)]) {
+        let mapped: [WriteRequest] = items.map { item in
+            WriteRequest(id: item.id, central: item.central, characteristic: item.characteristic, offset: item.offset, value: item.value)
+        }
+        for cont in writeRequestContinuations.values { cont.yield(mapped) }
+        emit(.didReceiveWrite(mapped))
+    }
+
+    func handleDidSubscribe(centralID: UUID, cbCentral: CBCentral, central: Central, characteristic: Characteristic) {
+        centrals[centralID] = cbCentral
+        let event = SubscriptionEvent.subscribed(central: central, characteristic: characteristic)
+        for cont in subscriptionContinuations.values { cont.yield(event) }
+        emit(.didSubscribeToCharacteristic(central, characteristic: characteristic))
+    }
+
+    func handleDidUnsubscribe(central: Central, characteristic: Characteristic) {
+        let event = SubscriptionEvent.unsubscribed(central: central, characteristic: characteristic)
+        for cont in subscriptionContinuations.values { cont.yield(event) }
+        emit(.didUnsubscribeFromCharacteristic(central, characteristic: characteristic))
+    }
+
+    func handleIsReadyToUpdateSubscribers() {
+        emit(.isReadyToUpdateSubscribers)
+    }
+
     // MARK: - Test support
 
     func injectServiceForTest(id: CBUUID, service: CBMutableService) {
         services[id] = service
+    }
+
+    func injectRequestForTest(id: UUID, request: CBATTRequest) {
+        attRequestStore.store(request, for: id)
     }
 }
