@@ -18,7 +18,10 @@ extension BluetoothCentralClient: DependencyKey {
             connect: { id, options in try await actor.connect(id: id, options: options) },
             disconnect: { id in try await actor.disconnect(id: id) },
             retrievePeripherals: { ids in await actor.retrievePeripherals(ids: ids) },
-            retrieveConnected: { services in await actor.retrieveConnected(services: services) },
+            retrieveConnected: { services in
+                nonisolated(unsafe) let servicesCopy: [CBUUID] = Array(services)
+                return await actor.retrieveConnected(services: servicesCopy)
+            },
             discoverServices: { pid, sids in try await actor.discoverServices(peripheralID: pid, serviceIDs: sids) },
             discoverCharacteristics: { pid, sid, cids in try await actor.discoverCharacteristics(peripheralID: pid, serviceID: sid, characteristicIDs: cids) },
             readValue: { pid, cid in try await actor.readValue(peripheralID: pid, characteristicID: cid) },
@@ -161,15 +164,74 @@ final actor CentralActor {
         scanContinuation = nil
     }
 
-    nonisolated func connect(id: UUID, options: ConnectOptions?) async throws -> Peripheral { throw BluetoothError.poweredOff }
-    nonisolated func disconnect(id: UUID) async throws { throw BluetoothError.poweredOff }
-    nonisolated func retrievePeripherals(ids: [UUID]) async -> [Peripheral] { [] }
-    nonisolated func retrieveConnected(services: [CBUUID]) async -> [Peripheral] { [] }
+    func connect(id: UUID, options: ConnectOptions?) async throws -> Peripheral {
+        try preflightCheck()
+        let connection: any PeripheralConnection
+        if let existing = peripherals[id] {
+            connection = existing
+        } else if let lookedUp = lookupPeripheral(id: id) {
+            connection = lookedUp
+        } else {
+            throw BluetoothError.unknownPeripheral(id)
+        }
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Peripheral, any Error>) in
+            pendingConnect[id] = cont
+            if let cbPeripheral = connection as? CBPeripheral {
+                manager.connect(cbPeripheral, options: options?.dictionary)
+            }
+        }
+    }
+
+    func disconnect(id: UUID) async throws {
+        guard let cb = peripherals[id] as? CBPeripheral else {
+            throw BluetoothError.unknownPeripheral(id)
+        }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
+            pendingDisconnect[id] = cont
+            manager.cancelPeripheralConnection(cb)
+        }
+    }
+
+    func retrievePeripherals(ids: [UUID]) async -> [Peripheral] {
+        let cbs = manager.retrievePeripherals(withIdentifiers: ids)
+        for cb in cbs { peripherals[cb.identifier] = cb }
+        return cbs.map(Peripheral.init)
+    }
+
+    func retrieveConnected(services: [CBUUID]) async -> [Peripheral] {
+        let cbs = manager.retrieveConnectedPeripherals(withServices: services)
+        for cb in cbs { peripherals[cb.identifier] = cb }
+        return cbs.map(Peripheral.init)
+    }
+
     nonisolated func discoverServices(peripheralID: UUID, serviceIDs: [CBUUID]?) async throws -> [Service] { throw BluetoothError.poweredOff }
     nonisolated func discoverCharacteristics(peripheralID: UUID, serviceID: CBUUID, characteristicIDs: [CBUUID]?) async throws -> [Characteristic] { throw BluetoothError.poweredOff }
     nonisolated func readValue(peripheralID: UUID, characteristicID: CBUUID) async throws -> Data { throw BluetoothError.poweredOff }
     nonisolated func writeValue(data: Data, peripheralID: UUID, characteristicID: CBUUID, type: CBCharacteristicWriteType) async throws { throw BluetoothError.poweredOff }
     nonisolated func setNotify(enabled: Bool, peripheralID: UUID, characteristicID: CBUUID) async throws { throw BluetoothError.poweredOff }
+
+    // MARK: - Private helpers
+
+    private func preflightCheck() throws {
+        nonisolated(unsafe) let mgr: any CentralManaging = manager
+        switch mgr.state {
+        case .poweredOn: return
+        case .poweredOff: throw BluetoothError.poweredOff
+        case .unsupported: throw BluetoothError.unsupported
+        case .unauthorized: throw BluetoothError.unauthorized(CBManager.authorization)
+        case .unknown, .resetting: return
+        @unknown default: return
+        }
+    }
+
+    private func lookupPeripheral(id: UUID) -> (any PeripheralConnection)? {
+        let cbs = manager.retrievePeripherals(withIdentifiers: [id])
+        if let cb = cbs.first {
+            peripherals[id] = cb
+            return cb
+        }
+        return nil
+    }
 
     // MARK: - Private actor-isolated registration helpers
 

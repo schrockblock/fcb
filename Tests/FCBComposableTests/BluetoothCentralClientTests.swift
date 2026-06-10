@@ -96,3 +96,67 @@ struct BluetoothCentralClientScanTests {
         }
     }
 }
+
+@MainActor
+struct BluetoothCentralClientConnectTests {
+    @Test func connectResolvesOnDidConnect() async throws {
+        let fake = FakeCentralManager()
+        let peripheral = BLETestStubLocal.peripheral()
+        fake.registeredPeripherals[peripheral.identifier] = peripheral
+        let actor = CentralActor(manager: fake)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        let connectTask = Task { try await actor.connect(id: peripheral.identifier, options: nil) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        fake.simulateDidConnect(peripheral)
+
+        let result = try await connectTask.value
+        #expect(result.id == peripheral.identifier)
+        #expect(fake.connectCalls.count == 1)
+    }
+
+    @Test func connectThrowsConnectionFailedOnDidFailToConnect() async {
+        let fake = FakeCentralManager()
+        let peripheral = BLETestStubLocal.peripheral()
+        fake.registeredPeripherals[peripheral.identifier] = peripheral
+        let actor = CentralActor(manager: fake)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        let task = Task { try await actor.connect(id: peripheral.identifier, options: nil) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        fake.simulateDidFailToConnect(peripheral, error: NSError(domain: "x", code: 1))
+
+        await #expect(throws: BluetoothError.self) {
+            _ = try await task.value
+        }
+    }
+
+    @Test func connectThrowsUnknownPeripheralWhenNotRegistered() async {
+        let fake = FakeCentralManager()
+        let actor = CentralActor(manager: fake)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await #expect(throws: BluetoothError.self) {
+            _ = try await actor.connect(id: UUID(), options: nil)
+        }
+    }
+
+    @Test func disconnectResolvesOnDidDisconnect() async throws {
+        let fake = FakeCentralManager()
+        let peripheral = BLETestStubLocal.peripheral()
+        fake.registeredPeripherals[peripheral.identifier] = peripheral
+        let actor = CentralActor(manager: fake)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        // Connect first so the actor knows about this peripheral
+        let connectTask = Task { try await actor.connect(id: peripheral.identifier, options: nil) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        fake.simulateDidConnect(peripheral)
+        _ = try await connectTask.value
+
+        let disconnectTask = Task { try await actor.disconnect(id: peripheral.identifier) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        fake.simulateDidDisconnect(peripheral, error: nil)
+        try await disconnectTask.value
+        #expect(fake.cancelCalls.count == 1)
+    }
+}
