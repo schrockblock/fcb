@@ -4,7 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "FCB",
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS(.v17), .macOS(.v13)],
     products: [
         .library(name: "FCB", targets: ["FCB"]),
         .library(name: "FCBComposable", targets: ["FCBComposable"]),
