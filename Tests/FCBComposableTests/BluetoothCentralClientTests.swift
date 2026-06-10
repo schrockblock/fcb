@@ -160,3 +160,32 @@ struct BluetoothCentralClientConnectTests {
         #expect(fake.cancelCalls.count == 1)
     }
 }
+
+@MainActor
+struct BluetoothCentralClientDiscoveryTests {
+    @Test func discoverServicesThrowsUnknownPeripheral() async {
+        let fake = FakeCentralManager()
+        let actor = CentralActor(manager: fake)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await #expect(throws: BluetoothError.self) {
+            _ = try await actor.discoverServices(peripheralID: UUID(), serviceIDs: nil)
+        }
+    }
+
+    @Test func discoverServicesResolvesWhenDelegateFires() async throws {
+        let fake = FakeCentralManager()
+        let actor = CentralActor(manager: fake)
+        let pid = UUID()
+        let fakeConn = FakePeripheralConnection(identifier: pid)
+        await actor.injectPeripheralForTest(id: pid, connection: fakeConn)
+
+        let task = Task { try await actor.discoverServices(peripheralID: pid, serviceIDs: nil) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(fakeConn.discoverServicesCalls.count == 1)
+
+        // Simulate completion: services empty (real CB conversion would happen here)
+        await actor.completeDiscoverServicesForTest(peripheralID: pid, services: [])
+        let services = try await task.value
+        #expect(services.isEmpty)
+    }
+}

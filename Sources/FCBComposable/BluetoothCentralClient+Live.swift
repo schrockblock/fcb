@@ -22,8 +22,14 @@ extension BluetoothCentralClient: DependencyKey {
                 nonisolated(unsafe) let servicesCopy: [CBUUID] = Array(services)
                 return await actor.retrieveConnected(services: servicesCopy)
             },
-            discoverServices: { pid, sids in try await actor.discoverServices(peripheralID: pid, serviceIDs: sids) },
-            discoverCharacteristics: { pid, sid, cids in try await actor.discoverCharacteristics(peripheralID: pid, serviceID: sid, characteristicIDs: cids) },
+            discoverServices: { pid, sids in
+                nonisolated(unsafe) let sidsCopy: [CBUUID]? = sids.map { Array($0) }
+                return try await actor.discoverServices(peripheralID: pid, serviceIDs: sidsCopy)
+            },
+            discoverCharacteristics: { pid, sid, cids in
+                nonisolated(unsafe) let cidsCopy: [CBUUID]? = cids.map { Array($0) }
+                return try await actor.discoverCharacteristics(peripheralID: pid, serviceID: sid, characteristicIDs: cidsCopy)
+            },
             readValue: { pid, cid in try await actor.readValue(peripheralID: pid, characteristicID: cid) },
             writeValue: { data, pid, cid, type in try await actor.writeValue(data: data, peripheralID: pid, characteristicID: cid, type: type) },
             setNotify: { enabled, pid, cid in try await actor.setNotify(enabled: enabled, peripheralID: pid, characteristicID: cid) },
@@ -204,11 +210,46 @@ final actor CentralActor {
         return cbs.map(Peripheral.init)
     }
 
-    nonisolated func discoverServices(peripheralID: UUID, serviceIDs: [CBUUID]?) async throws -> [Service] { throw BluetoothError.poweredOff }
-    nonisolated func discoverCharacteristics(peripheralID: UUID, serviceID: CBUUID, characteristicIDs: [CBUUID]?) async throws -> [Characteristic] { throw BluetoothError.poweredOff }
+    func discoverServices(peripheralID: UUID, serviceIDs: [CBUUID]?) async throws -> [Service] {
+        try preflightCheck()
+        guard let connection = peripherals[peripheralID] else {
+            throw BluetoothError.unknownPeripheral(peripheralID)
+        }
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[Service], any Error>) in
+            pendingDiscoverServices[peripheralID] = cont
+            connection.discoverServices(serviceIDs)
+        }
+    }
+
+    func discoverCharacteristics(peripheralID: UUID, serviceID: CBUUID, characteristicIDs: [CBUUID]?) async throws -> [Characteristic] {
+        try preflightCheck()
+        guard let connection = peripherals[peripheralID] else {
+            throw BluetoothError.unknownPeripheral(peripheralID)
+        }
+        guard let service = connection.services?.first(where: { $0.uuid == serviceID }) else {
+            throw BluetoothError.unknownService(serviceID, peripheralID: peripheralID)
+        }
+        let key = "\(peripheralID.uuidString):\(serviceID.uuidString)"
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[Characteristic], any Error>) in
+            pendingDiscoverCharacteristics[key] = cont
+            connection.discoverCharacteristics(characteristicIDs, for: service)
+        }
+    }
+
     nonisolated func readValue(peripheralID: UUID, characteristicID: CBUUID) async throws -> Data { throw BluetoothError.poweredOff }
     nonisolated func writeValue(data: Data, peripheralID: UUID, characteristicID: CBUUID, type: CBCharacteristicWriteType) async throws { throw BluetoothError.poweredOff }
     nonisolated func setNotify(enabled: Bool, peripheralID: UUID, characteristicID: CBUUID) async throws { throw BluetoothError.poweredOff }
+
+    // Testing helpers — internal access for @testable import. Do not call from production.
+    func injectPeripheralForTest(id: UUID, connection: any PeripheralConnection) {
+        peripherals[id] = connection
+    }
+
+    func completeDiscoverServicesForTest(peripheralID: UUID, services: [Service]) {
+        if let cont = pendingDiscoverServices.removeValue(forKey: peripheralID) {
+            cont.resume(returning: services)
+        }
+    }
 
     // MARK: - Private helpers
 
@@ -328,7 +369,7 @@ final actor CentralActor {
     }
 
     private func handleDidDiscoverCharacteristics(peripheralID: UUID, serviceID: CBUUID, characteristics: [Characteristic], nsError: NSError?) {
-        let key = "\(peripheralID)/\(serviceID)"
+        let key = "\(peripheralID.uuidString):\(serviceID.uuidString)"
         if let cont = pendingDiscoverCharacteristics.removeValue(forKey: key) {
             if let nsError {
                 cont.resume(throwing: BluetoothError(nsError))
