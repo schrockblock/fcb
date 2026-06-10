@@ -70,6 +70,10 @@ final actor PeripheralRoleActor {
             let svcID = cbService.uuid
             Task { await self?.handleDidAddService(serviceID: svcID, service: mappedService, error: nsError) }
         }
+        delegate.onDidStartAdvertising = { [weak self] _, error in
+            let nsError = error as NSError?
+            Task { await self?.handleDidStartAdvertising(error: nsError) }
+        }
     }
 
     // MARK: - State and event streams
@@ -126,11 +130,36 @@ final actor PeripheralRoleActor {
         manager.removeAllServices()
     }
 
-    // MARK: - Advertising / other stubs (filled in by Tasks 22-23)
+    // MARK: - Advertising
 
-    nonisolated func startAdvertising(data: AdvertisementData?) async throws { throw BluetoothError.poweredOff }
-    nonisolated func stopAdvertising() async {}
-    nonisolated func isAdvertising() async -> Bool { false }
+    func startAdvertising(data: AdvertisementData?) async throws {
+        try preflightCheck()
+        let dict = advertisementDictionary(from: data)
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
+            pendingStartAdvertising = cont
+            manager.startAdvertising(dict)
+        }
+    }
+
+    func stopAdvertising() async {
+        manager.stopAdvertising()
+    }
+
+    func isAdvertising() async -> Bool {
+        nonisolated(unsafe) let mgr: any PeripheralManaging = manager
+        return mgr.isAdvertising
+    }
+
+    private func advertisementDictionary(from data: AdvertisementData?) -> [String: Any]? {
+        guard let data else { return nil }
+        var dict: [String: Any] = [:]
+        if let localName = data.localName { dict[CBAdvertisementDataLocalNameKey] = localName }
+        if !data.serviceUUIDs.isEmpty { dict[CBAdvertisementDataServiceUUIDsKey] = data.serviceUUIDs }
+        return dict
+    }
+
+    // MARK: - Other stubs (filled in by Task 23)
+
     nonisolated func respond(requestID: UUID, result: CBATTError.Code) async {}
     nonisolated func updateValue(data: Data, characteristicID: CBUUID, centralIDs: [UUID]?) async throws { throw BluetoothError.poweredOff }
 
@@ -178,6 +207,19 @@ final actor PeripheralRoleActor {
                 cont.resume(throwing: err)
             } else {
                 cont.resume(returning: service)
+            }
+        }
+    }
+
+    func handleDidStartAdvertising(error: NSError?) {
+        let mappedError = error.map { BluetoothError($0) }
+        emit(.didStartAdvertising(error: mappedError))
+        if let cont = pendingStartAdvertising {
+            pendingStartAdvertising = nil
+            if let err = mappedError {
+                cont.resume(throwing: err)
+            } else {
+                cont.resume(returning: ())
             }
         }
     }

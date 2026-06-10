@@ -75,3 +75,37 @@ struct BluetoothPeripheralClientServicesTests {
         #expect(fake.removeAllCount == 1)
     }
 }
+
+@MainActor
+struct BluetoothPeripheralClientAdvertisingTests {
+    @Test func startAdvertisingResolvesWhenDelegateFires() async throws {
+        let fake = FakePeripheralManager()
+        let actor = PeripheralRoleActor(manager: fake)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let ad = AdvertisementData(localName: "Me")
+
+        let task = Task { try await actor.startAdvertising(data: ad) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(fake.startAdvertisingCalls.count == 1)
+
+        fake.simulateDidStartAdvertising(error: nil)
+        try await task.value
+    }
+
+    @Test func stopAdvertisingCallsManager() async {
+        let fake = FakePeripheralManager()
+        let actor = PeripheralRoleActor(manager: fake)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        await actor.stopAdvertising()
+        #expect(fake.stopAdvertisingCount == 1)
+    }
+
+    @Test func isAdvertisingReflectsManagerState() async {
+        let fake = FakePeripheralManager()
+        fake.isAdvertising = true
+        let actor = PeripheralRoleActor(manager: fake)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let advertising = await actor.isAdvertising()
+        #expect(advertising == true)
+    }
+}
