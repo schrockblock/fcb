@@ -121,22 +121,3 @@ public struct DiscoveredPeripheralRow: Equatable, Identifiable {
         self.discovered = discovered
     }
 }
-
-// Temporary stub — replaced by full implementation in Task 5.
-@Reducer
-public struct PeripheralDetailFeature {
-    @ObservableState
-    public struct State: Equatable, Identifiable {
-        public let peripheral: Peripheral
-        public var id: UUID { peripheral.id }
-
-        public init(peripheral: Peripheral) {
-            self.peripheral = peripheral
-        }
-    }
-    public enum Action { case _placeholder }
-    public init() {}
-    public var body: some ReducerOf<Self> {
-        Reduce { _, _ in .none }
-    }
-}
