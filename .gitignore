@@ -6,3 +6,8 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+
+# FCBDemo build artifacts
+Example/*/.build/
+Example/*/.swiftpm/configuration/registries.json
+Example/*/.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
