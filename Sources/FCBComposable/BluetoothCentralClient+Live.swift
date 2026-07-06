@@ -361,6 +361,11 @@ final actor CentralActor {
 
     private func registerStateContinuation(_ token: UUID, continuation: AsyncStream<CBManagerState>.Continuation) {
         stateContinuations[token] = continuation
+        // Replay the manager's current state so subscribers that attach AFTER a
+        // state transition (e.g. .poweredOn fired during app init, long before
+        // the consumer's for-await began) don't wait forever for an event that
+        // already happened.
+        continuation.yield(manager.state)
     }
 
     private func unregisterStateContinuation(_ token: UUID) {

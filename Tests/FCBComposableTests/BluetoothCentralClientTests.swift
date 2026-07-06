@@ -80,6 +80,20 @@ struct BluetoothCentralClientScanTests {
         #expect(next == .poweredOn)
     }
 
+    @Test func stateStreamReplaysCurrentStateOnSubscribe() async {
+        // A subscriber that attaches AFTER the manager already reached its state
+        // must immediately receive that state — not wait for a future transition
+        // that may never come.
+        let fake = FakeCentralManager()
+        fake.state = .poweredOn
+        let actor = CentralActor(manager: fake)
+        let stream = actor.stateStream()
+        var iter = stream.makeAsyncIterator()
+        // No simulateDidUpdateState here on purpose.
+        let next = await iter.next()
+        #expect(next == .poweredOn)
+    }
+
     @Test func eventStreamYieldsDidConnect() async {
         let fake = FakeCentralManager()
         let actor = CentralActor(manager: fake)

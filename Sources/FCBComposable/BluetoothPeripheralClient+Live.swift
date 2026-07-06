@@ -249,6 +249,9 @@ final actor PeripheralRoleActor {
 
     private func registerStateContinuation(_ token: UUID, continuation: AsyncStream<CBManagerState>.Continuation) {
         stateContinuations[token] = continuation
+        // Replay the manager's current state so late subscribers don't wait
+        // forever for a transition that fired before they attached.
+        continuation.yield(manager.state)
     }
     private func unregisterStateContinuation(_ token: UUID) {
         stateContinuations.removeValue(forKey: token)

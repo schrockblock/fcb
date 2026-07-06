@@ -73,6 +73,19 @@ struct BluetoothPeripheralClientServicesTests {
         #expect(next == .poweredOn)
     }
 
+    @Test func stateStreamReplaysCurrentStateOnSubscribe() async {
+        // Late subscribers must receive the manager's current state immediately,
+        // not hang waiting for a transition that already happened.
+        let fake = FakePeripheralManager()
+        fake.state = .poweredOn
+        let actor = PeripheralRoleActor(manager: fake)
+        let stream = actor.stateStream()
+        var iter = stream.makeAsyncIterator()
+        // No simulateDidUpdateState here on purpose.
+        let next = await iter.next()
+        #expect(next == .poweredOn)
+    }
+
     @Test func addServiceResolvesWhenDelegateFires() async throws {
         let fake = FakePeripheralManager()
         let actor = PeripheralRoleActor(manager: fake)
