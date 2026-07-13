@@ -103,17 +103,30 @@ import Foundation
 import Testing
 @testable import FCBComposable
 
+/// CBM mock managers initialize asynchronously — `state` stays `.unknown`
+/// until a queue hop after creation completes. Poll until the expected
+/// state lands (also used by later tasks' test files).
+@MainActor
+func waitForManagerState(_ manager: CBMCentralManager, toReach state: CBMManagerState) async {
+    for _ in 0..<200 {
+        if manager.state == state { return }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+    }
+}
+
 extension CBMBackedTests {
     @Suite @MainActor
     struct FCBMDelegateTests {
         @Test func centralDelegateForwardsDidUpdateState() async {
             CBMCentralManagerMock.tearDownSimulation()
             CBMCentralManagerMock.simulateInitialState(.poweredOn)
-            let manager = CBMCentralManagerFactory.instance(forceMock: true)
             let delegate = FCBMCentralManagerDelegate()
             nonisolated(unsafe) var received: CBMManagerState?
             delegate.onDidUpdateState = { central in received = central.state }
-            delegate.centralManagerDidUpdateState(manager)
+            // Attach the wrapper at creation so CBM's own initialization
+            // callback exercises the real forwarding path.
+            let manager = CBMCentralManagerFactory.instance(delegate: delegate, queue: nil, forceMock: true)
+            await waitForManagerState(manager, toReach: .poweredOn)
             #expect(received == .poweredOn)
         }
 
@@ -128,6 +141,7 @@ extension CBMBackedTests {
                 .build()
             CBMCentralManagerMock.simulatePeripherals([spec])
             let manager = CBMCentralManagerFactory.instance(forceMock: true)
+            await waitForManagerState(manager, toReach: .poweredOn)
             let peripheral = manager.retrievePeripherals(withIdentifiers: [id]).first!
             let characteristic = CBMCharacteristicMock(type: CBMUUID(string: "2A19"), properties: [.read])
             let delegate = FCBMPeripheralDelegate()
@@ -479,8 +493,11 @@ struct MockRadioSetup {
 
 /// Tears down any previous simulation and stands up one battery-service
 /// peripheral behind a fresh mock manager wrapped in a CentralActor.
+/// Waits for the manager's async initialization to reach the simulated
+/// state (via `waitForManagerState` from FCBMDelegateTests.swift) before
+/// wrapping it — otherwise early calls see `.unknown`.
 @MainActor
-func makeMockRadio(id: UUID = UUID(), state: CBMManagerState = .poweredOn) -> MockRadioSetup {
+func makeMockRadio(id: UUID = UUID(), state: CBMManagerState = .poweredOn) async -> MockRadioSetup {
     CBMCentralManagerMock.tearDownSimulation()
     CBMCentralManagerMock.simulateInitialState(state)
     let specDelegate = RecordingSpecDelegate()
@@ -496,17 +513,21 @@ func makeMockRadio(id: UUID = UUID(), state: CBMManagerState = .poweredOn) -> Mo
         .allowForRetrieval()
         .build()
     CBMCentralManagerMock.simulatePeripherals([spec])
-    let actor = CentralActor(manager: CBMCentralManagerFactory.instance(forceMock: true))
+    let manager = CBMCentralManagerFactory.instance(forceMock: true)
+    await waitForManagerState(manager, toReach: state)
+    let actor = CentralActor(manager: manager)
     return MockRadioSetup(actor: actor, spec: spec, specDelegate: specDelegate, characteristic: batteryLevel, id: id)
 }
 
 /// A mock manager with NO simulated peripherals (for unknown-peripheral paths).
 @MainActor
-func makeEmptyMockActor(state: CBMManagerState = .poweredOn) -> CentralActor {
+func makeEmptyMockActor(state: CBMManagerState = .poweredOn) async -> CentralActor {
     CBMCentralManagerMock.tearDownSimulation()
     CBMCentralManagerMock.simulateInitialState(state)
     CBMCentralManagerMock.simulatePeripherals([])
-    return CentralActor(manager: CBMCentralManagerFactory.instance(forceMock: true))
+    let manager = CBMCentralManagerFactory.instance(forceMock: true)
+    await waitForManagerState(manager, toReach: state)
+    return CentralActor(manager: manager)
 }
 
 /// Connects and discovers the battery service + characteristic — the
@@ -524,7 +545,7 @@ extension CBMBackedTests {
     @Suite @MainActor
     struct CentralScanAndStateTests {
         @Test func scanYieldsDiscoveredPeripheral() async {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             let stream = setup.actor.scan(services: [cbmBatteryServiceUUID], options: nil)
             var iter = stream.makeAsyncIterator()
             let discovered = await iter.next()
@@ -533,14 +554,14 @@ extension CBMBackedTests {
         }
 
         @Test func stateStreamReplaysCurrentStateOnSubscribe() async {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             var iter = setup.actor.stateStream().makeAsyncIterator()
             let first = await iter.next()
             #expect(first == .poweredOn)
         }
 
         @Test func stateStreamYieldsPowerOff() async {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             var iter = setup.actor.stateStream().makeAsyncIterator()
             let first = await iter.next()
             #expect(first == .poweredOn)
@@ -550,7 +571,7 @@ extension CBMBackedTests {
         }
 
         @Test func eventStreamYieldsDidConnect() async throws {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             let stream = setup.actor.eventStream()
             let connectTask = Task { try await setup.actor.connect(id: setup.id, options: nil) }
             var connectedID: UUID?
@@ -568,28 +589,28 @@ extension CBMBackedTests {
     @Suite @MainActor
     struct CentralConnectTests {
         @Test func connectResolvesViaRetrieval() async throws {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             let peripheral = try await setup.actor.connect(id: setup.id, options: nil)
             #expect(peripheral.id == setup.id)
             #expect(peripheral.state == .connected)
         }
 
         @Test func connectThrowsUnknownPeripheral() async {
-            let actor = makeEmptyMockActor()
+            let actor = await makeEmptyMockActor()
             await #expect(throws: BluetoothError.self) {
                 _ = try await actor.connect(id: UUID(), options: nil)
             }
         }
 
         @Test func connectThrowsWhenPoweredOff() async {
-            let actor = makeEmptyMockActor(state: .poweredOff)
+            let actor = await makeEmptyMockActor(state: .poweredOff)
             await #expect(throws: BluetoothError.self) {
                 _ = try await actor.connect(id: UUID(), options: nil)
             }
         }
 
         @Test func disconnectResolves() async throws {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             _ = try await setup.actor.connect(id: setup.id, options: nil)
             try await setup.actor.disconnect(id: setup.id)
         }
@@ -598,14 +619,14 @@ extension CBMBackedTests {
     @Suite @MainActor
     struct CentralDiscoveryTests {
         @Test func discoverServicesThrowsUnknownPeripheral() async {
-            let actor = makeEmptyMockActor()
+            let actor = await makeEmptyMockActor()
             await #expect(throws: BluetoothError.self) {
                 _ = try await actor.discoverServices(peripheralID: UUID(), serviceIDs: nil)
             }
         }
 
         @Test func discoverServicesReturnsMappedService() async throws {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             _ = try await setup.actor.connect(id: setup.id, options: nil)
             let services = try await setup.actor.discoverServices(peripheralID: setup.id, serviceIDs: [cbmBatteryServiceUUID])
             #expect(services.map(\.id) == [cbmBatteryServiceUUID])
@@ -613,7 +634,7 @@ extension CBMBackedTests {
         }
 
         @Test func discoverCharacteristicsReturnsMappedCharacteristic() async throws {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             _ = try await setup.actor.connect(id: setup.id, options: nil)
             _ = try await setup.actor.discoverServices(peripheralID: setup.id, serviceIDs: [cbmBatteryServiceUUID])
             let characteristics = try await setup.actor.discoverCharacteristics(peripheralID: setup.id, serviceID: cbmBatteryServiceUUID, characteristicIDs: nil)
@@ -625,14 +646,14 @@ extension CBMBackedTests {
     @Suite @MainActor
     struct CentralReadWriteNotifyTests {
         @Test func readValueReturnsSpecDelegateValue() async throws {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             try await connectAndDiscover(setup)
             let value = try await setup.actor.readValue(peripheralID: setup.id, characteristicID: cbmBatteryLevelUUID)
             #expect(value == Data([0x64]))
         }
 
         @Test func writeValueDeliversDataToSpecDelegate() async throws {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             try await connectAndDiscover(setup)
             try await setup.actor.writeValue(data: Data([0x01]), peripheralID: setup.id, characteristicID: cbmBatteryLevelUUID, type: .withResponse)
             #expect(setup.specDelegate.writes.count == 1)
@@ -640,7 +661,7 @@ extension CBMBackedTests {
         }
 
         @Test func notificationsStreamYieldsSimulatedUpdate() async throws {
-            let setup = makeMockRadio()
+            let setup = await makeMockRadio()
             try await connectAndDiscover(setup)
             try await setup.actor.setNotify(enabled: true, peripheralID: setup.id, characteristicID: cbmBatteryLevelUUID)
             let stream = setup.actor.notifications(peripheralID: setup.id, characteristicID: cbmBatteryLevelUUID)
@@ -1265,6 +1286,18 @@ extension CBMBackedTests {
             CBMCentralManagerMock.simulatePeripherals([spec])
 
             let client = BluetoothCentralClient.mocked()
+
+            // The mock manager powers on asynchronously. Poll through the
+            // public state stream — each new subscription replays the
+            // manager's current state.
+            var state: CBManagerState = .unknown
+            for _ in 0..<200 {
+                var stateIter = client.state().makeAsyncIterator()
+                state = await stateIter.next() ?? .unknown
+                if state == .poweredOn { break }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            #expect(state == .poweredOn)
 
             // Scan
             var scanIter = client.scan([cbmBatteryServiceUUID], nil).makeAsyncIterator()
