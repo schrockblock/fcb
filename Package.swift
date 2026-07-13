@@ -11,6 +11,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/pointfreeco/swift-composable-architecture", from: "1.0.0"),
+        .package(url: "https://github.com/NordicSemiconductor/IOS-CoreBluetooth-Mock.git", from: "1.0.0"),
     ],
     targets: [
         .target(name: "FCB"),
@@ -19,6 +20,7 @@ let package = Package(
             dependencies: [
                 "FCB",
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "CoreBluetoothMock", package: "IOS-CoreBluetooth-Mock"),
             ]
         ),
         .testTarget(name: "FCBTests", dependencies: ["FCB"]),

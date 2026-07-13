@@ -1,5 +1,5 @@
 {
-  "originHash" : "48a0d88e8152d1f9dac0c250999bd0ba59c37b3b8e6f64e6f64d7e8a0b1a16d3",
+  "originHash" : "f3270ca384bdb7160d06c6ce5a8a2ed60e99fb746873455f8683217cc4c6254f",
   "pins" : [
     {
       "identity" : "combine-schedulers",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "dcccb979a2183b8df3334237e3dc1ae2b4116a86",
         "version" : "1.2.0"
+      }
+    },
+    {
+      "identity" : "ios-corebluetooth-mock",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/NordicSemiconductor/IOS-CoreBluetooth-Mock.git",
+      "state" : {
+        "revision" : "5748c9e8b1750e0d7bc09243c099ff618f211cdf",
+        "version" : "1.0.6"
       }
     },
     {
