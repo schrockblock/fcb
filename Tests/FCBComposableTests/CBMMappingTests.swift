@@ -8,21 +8,27 @@ extension CBMBackedTests {
     @Suite @MainActor
     struct CBMMappingTests {
         @Test func serviceMapsUUIDAndPrimary() {
+            let pid = UUID()
             let service = CBMServiceMock(type: CBMUUID(string: "180F"), primary: true)
-            let mapped = Service(service)
+            let mapped = Service(service, peripheralID: pid)
             #expect(mapped.id == CBMUUID(string: "180F"))
+            #expect(mapped.peripheralID == pid)
             #expect(mapped.isPrimary)
         }
 
         @Test func characteristicMapsFields() {
+            let pid = UUID()
             let characteristic = CBMCharacteristicMock(type: CBMUUID(string: "2A19"), properties: [.read, .notify])
             let service = CBMServiceMock(type: CBMUUID(string: "180F"), primary: true, characteristics: characteristic)
-            _ = service  // Keep service alive for weak reference
-            let mapped = Characteristic(characteristic)
+            let mapped = Characteristic(characteristic, peripheralID: pid)
             #expect(mapped.id == CBMUUID(string: "2A19"))
             #expect(mapped.serviceID == CBMUUID(string: "180F"))
+            #expect(mapped.peripheralID == pid)
             #expect(mapped.properties.contains(.notify))
             #expect(mapped.isNotifying == false)
+            // The characteristic's service back-pointer is weak; keep the
+            // service alive through the assertions.
+            withExtendedLifetime(service) {}
         }
 
         @Test func peripheralMapsIdentifierNameAndState() async {
@@ -40,7 +46,10 @@ extension CBMBackedTests {
             let cbm = manager.retrievePeripherals(withIdentifiers: [id]).first!
             let mapped = Peripheral(cbm)
             #expect(mapped.id == id)
-            #expect(mapped.name == "Mapped")
+            // CBM mock peripherals expose a name only after being scanned or
+            // connected; a retrieved-but-never-connected peripheral has none
+            // (CBMPeripheralMock.name = wasConnected ? spec name : last ad name).
+            #expect(mapped.name == nil)
             #expect(mapped.state == .disconnected)
         }
 
