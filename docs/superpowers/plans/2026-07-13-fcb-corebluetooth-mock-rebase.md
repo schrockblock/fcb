@@ -259,7 +259,7 @@ git commit -m "feat: add CoreBluetoothMock dependency and internal CBM delegate 
 
 **Interfaces:**
 - Consumes: existing value types `Peripheral(id:name:state:)`, `Service(id:peripheralID:isPrimary:)`, `Characteristic(id:serviceID:peripheralID:properties:value:isNotifying:)`, `ConnectionState(_: CBPeripheralState)` (works for CBM via the `CBMPeripheralState = CBPeripheralState` typealias).
-- Produces: `Peripheral.init(_ p: any CBMPeripheral)`, `Service.init(_ s: CBMService)`, `Characteristic.init(_ c: CBMCharacteristic)`, `CBManagerState.init(_ state: CBMManagerState)` — all used by Task 3's actor rewrite. The existing `+CB` initializers remain until Task 3 deletes them.
+- Produces: `Peripheral.init(_ p: any CBMPeripheral)`, `Service.init(_ s: CBMService, peripheralID: UUID)`, `Characteristic.init(_ c: CBMCharacteristic, peripheralID: UUID)`, `CBManagerState.init(_ state: CBMManagerState)` — all used by Task 3's actor rewrite. The `peripheralID` is an explicit parameter (the caller always knows it) because `CBMService.peripheral`/`CBMCharacteristic.service` back-pointers on standalone mocks are CBM-internal placeholders whose accessors trap — never traverse `.peripheral` from a service. The existing `+CB` initializers remain until Task 3 deletes them.
 
 - [ ] **Step 1: Write the failing mapping tests**
 
@@ -276,20 +276,27 @@ extension CBMBackedTests {
     @Suite @MainActor
     struct CBMMappingTests {
         @Test func serviceMapsUUIDAndPrimary() {
+            let pid = UUID()
             let service = CBMServiceMock(type: CBMUUID(string: "180F"), primary: true)
-            let mapped = Service(service)
+            let mapped = Service(service, peripheralID: pid)
             #expect(mapped.id == CBMUUID(string: "180F"))
+            #expect(mapped.peripheralID == pid)
             #expect(mapped.isPrimary)
         }
 
         @Test func characteristicMapsFields() {
+            let pid = UUID()
             let characteristic = CBMCharacteristicMock(type: CBMUUID(string: "2A19"), properties: [.read, .notify])
-            _ = CBMServiceMock(type: CBMUUID(string: "180F"), primary: true, characteristics: characteristic)
-            let mapped = Characteristic(characteristic)
+            let service = CBMServiceMock(type: CBMUUID(string: "180F"), primary: true, characteristics: characteristic)
+            let mapped = Characteristic(characteristic, peripheralID: pid)
             #expect(mapped.id == CBMUUID(string: "2A19"))
             #expect(mapped.serviceID == CBMUUID(string: "180F"))
+            #expect(mapped.peripheralID == pid)
             #expect(mapped.properties.contains(.notify))
             #expect(mapped.isNotifying == false)
+            // The characteristic's service back-pointer is weak; keep the
+            // service alive through the assertions.
+            withExtendedLifetime(service) {}
         }
 
         @Test func peripheralMapsIdentifierNameAndState() async {
@@ -303,10 +310,14 @@ extension CBMBackedTests {
                 .build()
             CBMCentralManagerMock.simulatePeripherals([spec])
             let manager = CBMCentralManagerFactory.instance(forceMock: true)
+            await waitForManagerState(manager, toReach: .poweredOn)
             let cbm = manager.retrievePeripherals(withIdentifiers: [id]).first!
             let mapped = Peripheral(cbm)
             #expect(mapped.id == id)
-            #expect(mapped.name == "Mapped")
+            // CBM mock peripherals expose a name only after being scanned or
+            // connected; a retrieved-but-never-connected peripheral has none
+            // (CBMPeripheralMock.name = wasConnected ? spec name : last ad name).
+            #expect(mapped.name == nil)
             #expect(mapped.state == .disconnected)
         }
 
@@ -349,8 +360,11 @@ import CoreBluetoothMock
 import Foundation
 
 extension Service {
-    init(_ s: CBMService) {
-        self.init(id: s.uuid, peripheralID: s.peripheral?.identifier ?? UUID(), isPrimary: s.isPrimary)
+    /// `peripheralID` is explicit: the caller always knows it, and CBM's
+    /// `CBMService.peripheral` back-pointer on standalone mocks is an
+    /// internal placeholder whose accessors trap — never traverse it.
+    init(_ s: CBMService, peripheralID: UUID) {
+        self.init(id: s.uuid, peripheralID: peripheralID, isPrimary: s.isPrimary)
     }
 }
 ```
@@ -363,11 +377,13 @@ import CoreBluetoothMock
 import Foundation
 
 extension Characteristic {
-    init(_ c: CBMCharacteristic) {
+    /// `peripheralID` is explicit for the same reason as `Service`'s CBM
+    /// initializer: the service→peripheral back-pointer must not be traversed.
+    init(_ c: CBMCharacteristic, peripheralID: UUID) {
         self.init(
             id: c.uuid,
             serviceID: c.service?.uuid ?? CBUUID(),
-            peripheralID: c.service?.peripheral?.identifier ?? UUID(),
+            peripheralID: peripheralID,
             properties: c.properties,
             value: c.value,
             isNotifying: c.isNotifying
@@ -405,7 +421,7 @@ Expected: 4 tests PASS.
 
 - [ ] **Step 5: Mutation check**
 
-Batch-apply: in `Service+CBM.swift` replace `isPrimary: s.isPrimary` with `isPrimary: false`; in `Characteristic+CBM.swift` replace `serviceID: c.service?.uuid ?? CBUUID()` with `serviceID: CBUUID()`; in `CBManagerState+CBM.swift` swap the `.poweredOn` case body to `self = .poweredOff`; in `Peripheral+CBM.swift` replace `name: p.name` with `name: nil`. Run `swift test --filter CBMMappingTests` → expect all 4 tests FAIL. Revert all mutations → expect 4 PASS.
+Batch-apply: in `Service+CBM.swift` replace `isPrimary: s.isPrimary` with `isPrimary: false`; in `Characteristic+CBM.swift` replace `serviceID: c.service?.uuid ?? CBUUID()` with `serviceID: CBUUID()`; in `CBManagerState+CBM.swift` swap the `.poweredOn` case body to `self = .poweredOff`; in `Peripheral+CBM.swift` replace `id: p.identifier` with `id: UUID()`. Run `swift test --filter CBMMappingTests` → expect all 4 tests FAIL. Revert all mutations → expect 4 PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -829,7 +845,7 @@ final actor CentralActor {
         }
         peripheralDelegate.onDidDiscoverServices = { [weak self] peripheral, error in
             let id = peripheral.identifier
-            let services = peripheral.services?.map { Service($0) } ?? []
+            let services = peripheral.services?.map { Service($0, peripheralID: id) } ?? []
             let nsError = error.map { $0 as NSError }
             Task { await self?.handleDidDiscoverServices(id: id, services: services, nsError: nsError) }
         }
@@ -837,7 +853,7 @@ final actor CentralActor {
             let pid = peripheral.identifier
             let serviceID = service.uuid
             nonisolated(unsafe) let cbmChars: [CBMCharacteristic] = service.characteristics ?? []
-            let valueTypes = cbmChars.map { Characteristic($0) }
+            let valueTypes = cbmChars.map { Characteristic($0, peripheralID: pid) }
             let nsError = error.map { $0 as NSError }
             Task { await self?.handleDidDiscoverCharacteristics(peripheralID: pid, serviceID: serviceID, cbmCharacteristics: cbmChars, characteristics: valueTypes, error: nsError) }
         }
