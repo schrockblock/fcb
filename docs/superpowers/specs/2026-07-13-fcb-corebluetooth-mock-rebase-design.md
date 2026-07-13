@@ -27,8 +27,7 @@ Only `FCBComposable` changes. The `FCB` Layer 1 target (plain CB delegate wrappe
 
 Within `FCBComposable`'s central-role internals, replace CB types with their CBM mirrors:
 
-- `CentralManaging` → satisfied by `CBMCentralManager` (`delegate: CBMCentralManagerDelegate?`, methods on `CBMPeripheral`).
-- `PeripheralConnection` → satisfied by `CBMPeripheral` (`CBMService`, `CBMCharacteristic`, `CBMPeripheralDelegate`). Note `CBMPeripheral` is a protocol in CBM, which if anything simplifies faking.
+- `CentralManaging` and `PeripheralConnection` are **deleted**: `CentralActor` holds a `CBMCentralManager` and `any CBMPeripheral` values directly. CBM is itself the abstraction (native passthrough vs. mock), so the internal protocols would duplicate it — and CBM's concrete peripheral classes are internal to CBM, so retrofitting conformances onto them isn't possible anyway. Tests drive the real actor through `CBMCentralManagerMock` + `CBMPeripheralSpec` instead of injected fakes.
 - `CBManagerState` ↔ `CBMManagerState` etc. are typealiases or trivially bridged; public API types (`CBUUID`, `CBCharacteristicWriteType`, `CBManagerState`, `CBManagerAuthorization`) remain CoreBluetooth types so **the public `BluetoothCentralClient` surface is unchanged**. CBM uses `CBMUUID`/write-type typealiases that bridge to the CB equivalents.
 
 ### Delegate wrappers
@@ -61,7 +60,7 @@ Consumers (tests, Simulator builds) script `CBMPeripheralSpec`s with CBM's own A
 
 ### Tests
 
-- Existing Layer 2 central-role tests keep their structure; the internal fakes (`FakeCentralManager`, fake connections) migrate from CB-typed to CBM-typed, which **removes** the ObjC-runtime stubbing (`class_createInstance` / `object_setIvar`) for the central role — CBM types are constructible or protocol-based.
+- Existing Layer 2 central-role tests keep their intent but migrate from injected fakes (`FakeCentralManager`, fake connections — deleted) to driving the real actor through `CBMCentralManagerMock` + scripted `CBMPeripheralSpec`s, which **removes** the ObjC-runtime stubbing (`class_createInstance` / `object_setIvar`) for the central role. CBM's simulation is process-global, so all CBM-touching tests nest in one serialized suite.
 - Add one end-to-end test: `BluetoothCentralClient.mocked()` against a trivial `CBMPeripheralSpec` (advertise → scan → connect → discover → write → notify round-trip), proving the CBM seam works through the real `CentralActor`.
 - Layer 1 tests and peripheral-role tests are unchanged.
 
