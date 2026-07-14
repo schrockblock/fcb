@@ -41,6 +41,17 @@ extension BluetoothCentralClient: DependencyKey {
     }
 }
 
+extension BluetoothCentralClient {
+    /// A live client backed by `CBMCentralManagerMock`. Configure the simulation
+    /// FIRST via `CBMCentralManagerMock.simulateInitialState(_:)` and
+    /// `CBMCentralManagerMock.simulatePeripherals(_:)`, then create the client.
+    /// Intended for integration tests and Simulator builds; FCB does not wrap
+    /// CBM's simulation API — script `CBMPeripheralSpec`s directly.
+    public static func mocked() -> BluetoothCentralClient {
+        makeClient(actor: CentralActor(manager: CBMCentralManagerFactory.instance(forceMock: true)))
+    }
+}
+
 final actor CentralActor {
     private let manager: CBMCentralManager
     private let delegate = FCBMCentralManagerDelegate()
