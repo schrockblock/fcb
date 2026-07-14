@@ -1228,6 +1228,11 @@ final actor CentralActor {
 
 Concurrency note: if the compiler rejects a `nonisolated(unsafe) let` capture or demands one where the plan doesn't show it, follow the file's existing precedent (extract Sendable values synchronously in the closure, wrap non-Sendable references with `nonisolated(unsafe) let` before the `Task` hop). Do not restructure the actor to satisfy a diagnostic.
 
+Execution notes (learned implementing this task):
+- Delegate wiring must happen SYNCHRONOUSLY in `init` (not `Task { await self.wireDelegates() }`): CBM's mock fires its initial `didUpdateState` right after creation, and async wiring loses that callback nondeterministically.
+- The mock only accepts connections for peripherals whose advertisement includes `CBMAdvertisementDataIsConnectable: true as NSNumber` — the harness's advertising dict must carry it or every connect hangs.
+- `connectThrowsWhenPoweredOff` must assert the SPECIFIC `.poweredOff` error (not just `BluetoothError.self`) so the preflight mutation has a discriminating test.
+
 - [ ] **Step 5: Run the full test suite**
 
 Run: `swift test`
@@ -1296,6 +1301,7 @@ extension CBMBackedTests {
                 .advertising(advertisementData: [
                     CBMAdvertisementDataLocalNameKey: "E2EDev",
                     CBMAdvertisementDataServiceUUIDsKey: [cbmBatteryServiceUUID],
+                    CBMAdvertisementDataIsConnectable: true as NSNumber,
                 ], withInterval: 0.05)
                 .connectable(name: "E2EDev", services: [service], delegate: specDelegate, connectionInterval: 0.01)
                 .build()
