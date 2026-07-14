@@ -1,3 +1,4 @@
+@preconcurrency import CoreBluetooth
 import CoreBluetoothMock
 import Foundation
 
@@ -7,5 +8,10 @@ extension Service {
     /// internal placeholder whose accessors trap — never traverse it.
     init(_ s: CBMService, peripheralID: UUID) {
         self.init(id: s.uuid, peripheralID: peripheralID, isPrimary: s.isPrimary)
+    }
+
+    /// Used by the peripheral-role actor (CBPeripheralManager callbacks).
+    init(_ cb: CBService) {
+        self.init(id: cb.uuid, peripheralID: cb.peripheral?.identifier ?? UUID(), isPrimary: cb.isPrimary)
     }
 }
