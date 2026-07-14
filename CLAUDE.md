@@ -25,9 +25,18 @@ Closure-based wrappers around the three CoreBluetooth delegates:
 
 Every callback is exposed as an optional `@Sendable` closure. Subclassable via `open`. Two `CBCentralManagerDelegate` methods (`connectionEventDidOccur` and `didUpdateANCSAuthorizationFor`) are guarded with `#if !os(macOS)` because they're unavailable on macOS.
 
-### `FCBComposable` (Layer 2, depends on `FCB` + swift-composable-architecture)
+### `FCBComposable` (Layer 2, depends on `FCB` + swift-composable-architecture + CoreBluetoothMock)
 
-TCA `@DependencyClient` clients backed by internal `actor`s:
+TCA `@DependencyClient` clients backed by internal `actor`s. The central role is
+built on Nordic's CoreBluetoothMock (`CBMCentralManager`/`CBMPeripheral`):
+`liveValue` uses `CBMCentralManagerFactory.instance()` (native passthrough on
+device), and `BluetoothCentralClient.mocked()` returns a client backed by
+`CBMCentralManagerMock` for integration tests and Simulator use — configure
+`CBMCentralManagerMock.simulateInitialState(_:)` / `simulatePeripherals(_:)`
+before creating it. The peripheral role remains on real CoreBluetooth (CBM has
+no peripheral-manager mock). Public API keeps CoreBluetooth types; the internal
+`CBMManagerState` → `CBManagerState` bridge lives in
+`Sources/FCBComposable/Internal/CBManagerState+CBM.swift`.
 
 - `BluetoothCentralClient` — `scan`, `connect`, `discoverServices`, `discoverCharacteristics`, `readValue`, `writeValue`, `setNotify`, `notifications`, plus an escape-hatch `events` stream emitting `CentralEvent`.
 - `BluetoothPeripheralClient` — `add`/`remove` services, `startAdvertising`/`stopAdvertising`, `respond`, `updateValue`, plus streams for read/write requests, subscriptions, and a unified `events` stream emitting `PeripheralManagerEvent`.
@@ -43,9 +52,9 @@ Each client provides `liveValue`, `testValue` (macro-generated, throws on call),
 - Delegate closures (from the FCB layer) extract Sendable info (UUIDs, value-type Service/Characteristic) synchronously, then call actor-isolated handlers via `Task { await self?.handle…() }`.
 - Pending async-throws operations (e.g., `connect`, `discoverServices`) use per-operation `CheckedContinuation` maps inside the actor, keyed by `UUID` or `"\(peripheralUUID):\(characteristicUUID)"` strings.
 - `nonisolated(unsafe)` is used in a few places where non-Sendable `CentralManaging`/`PeripheralManaging` need to be read inside an actor (managers are `let` and the read properties are documented as thread-safe).
-- The actor depends on `CentralManaging` / `PeripheralManaging` / `PeripheralConnection` internal protocols (`Sources/FCBComposable/Internal/`). Production uses CB types directly; tests inject fakes (`FakeCentralManager`, `FakePeripheralManager`, `FakePeripheralConnection`).
+- `CentralActor` holds a `CBMCentralManager` and `any CBMPeripheral` values directly (no internal manager protocols for the central role); `PeripheralManaging` remains for the peripheral role, with `FakePeripheralManager` in tests. Central-role Layer 2 tests drive the real actor through `CBMCentralManagerMock` + `CBMPeripheralSpec`. Internal CBM closure-delegate wrappers live in `Sources/FCBComposable/Internal/FCBMDelegates.swift`.
 - Tests capture `var` into `@Sendable` closures with `nonisolated(unsafe) var …`.
-- CoreBluetooth instances that have no public init (`CBPeripheral`, `CBService`, `CBCharacteristic`, etc.) are stubbed in tests via `class_createInstance` from the Objective-C runtime, plus `Unmanaged.passRetained` to leak the stub for the test process's lifetime (avoids KVO dealloc crashes). `CBPeripheral` stubs additionally have a real `NSUUID` injected via `object_setIvar` to make `.identifier` non-crashing. Helpers live in `Tests/FCBTests/BLETestStub.swift` (Layer 1) and `BLETestStubLocal` enums local to the Layer 2 test files.
+- Layer 1 tests still stub un-instantiable CoreBluetooth types via `class_createInstance` (`Tests/FCBTests/BLETestStub.swift`); peripheral-role Layer 2 tests keep their local stubs. Central-role Layer 2 tests need no stubbing — they use CoreBluetoothMock. CBM's simulation is process-global, so every CBM-touching test nests inside the serialized `CBMBackedTests` parent suite (`Tests/FCBComposableTests/CBMBackedTests.swift`) and starts with `CBMCentralManagerMock.tearDownSimulation()`.
 
 ## Origin
 
