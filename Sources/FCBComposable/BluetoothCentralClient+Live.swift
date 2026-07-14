@@ -73,66 +73,65 @@ final actor CentralActor {
         manager.delegate = delegate
         nonisolated(unsafe) let weakDelegate = delegate
         nonisolated(unsafe) let weakPeriphDelegate = peripheralDelegate
-        // Capture self as nonisolated(unsafe) for the synchronous closure wiring.
-        // All handler closures re-enter the actor via Task { await self?.handle... }
+        // Each closure captures [weak self] to break the actor→delegate→closure→actor
+        // retain cycle. All handlers re-enter the actor via Task { await self?.handle... }
         // so there is no concurrent access to actor state from these captures.
-        nonisolated(unsafe) weak var weakSelf: CentralActor? = self
-        weakDelegate.onDidUpdateState = { central in
+        weakDelegate.onDidUpdateState = { [weak self] central in
             let state = central.state
-            Task { await weakSelf?.handleDidUpdateState(state) }
+            Task { await self?.handleDidUpdateState(state) }
         }
-        weakDelegate.onDidDiscover = { _, peripheral, ad, rssi in
+        weakDelegate.onDidDiscover = { [weak self] _, peripheral, ad, rssi in
             let advertisementData = AdvertisementData(dictionary: ad)
             let rssiInt = rssi.intValue
             nonisolated(unsafe) let p = peripheral
-            Task { await weakSelf?.recordDiscoveredPeripheral(peripheral: p, ad: advertisementData, rssi: rssiInt) }
+            Task { await self?.recordDiscoveredPeripheral(peripheral: p, ad: advertisementData, rssi: rssiInt) }
         }
-        weakDelegate.onDidConnect = { _, peripheral in
+        weakDelegate.onDidConnect = { [weak self] _, peripheral in
             nonisolated(unsafe) let p = peripheral
-            Task { await weakSelf?.handleDidConnect(peripheral: p) }
+            Task { await self?.handleDidConnect(peripheral: p) }
         }
-        weakDelegate.onDidFailToConnect = { _, peripheral, error in
+        weakDelegate.onDidFailToConnect = { [weak self] _, peripheral, error in
             let nsError = error.map { $0 as NSError }
             nonisolated(unsafe) let p = peripheral
-            Task { await weakSelf?.handleDidFailToConnect(peripheral: p, nsError: nsError) }
+            Task { await self?.handleDidFailToConnect(peripheral: p, nsError: nsError) }
         }
-        weakDelegate.onDidDisconnect = { _, peripheral, error in
+        weakDelegate.onDidDisconnect = { [weak self] _, peripheral, error in
             let nsError = error.map { $0 as NSError }
             nonisolated(unsafe) let p = peripheral
-            Task { await weakSelf?.handleDidDisconnect(peripheral: p, nsError: nsError) }
+            Task { await self?.handleDidDisconnect(peripheral: p, nsError: nsError) }
         }
-        weakPeriphDelegate.onDidDiscoverServices = { peripheral, error in
+        weakPeriphDelegate.onDidDiscoverServices = { [weak self] peripheral, error in
             let id = peripheral.identifier
             let services = peripheral.services?.map { Service($0, peripheralID: id) } ?? []
             let nsError = error.map { $0 as NSError }
-            Task { await weakSelf?.handleDidDiscoverServices(id: id, services: services, nsError: nsError) }
+            Task { await self?.handleDidDiscoverServices(id: id, services: services, nsError: nsError) }
         }
-        weakPeriphDelegate.onDidDiscoverCharacteristics = { peripheral, service, error in
+        weakPeriphDelegate.onDidDiscoverCharacteristics = { [weak self] peripheral, service, error in
             let pid = peripheral.identifier
             let serviceID = service.uuid
             nonisolated(unsafe) let cbmChars: [CBMCharacteristic] = service.characteristics ?? []
             let valueTypes = cbmChars.map { Characteristic($0, peripheralID: pid) }
             let nsError = error.map { $0 as NSError }
-            Task { await weakSelf?.handleDidDiscoverCharacteristics(peripheralID: pid, serviceID: serviceID, cbmCharacteristics: cbmChars, characteristics: valueTypes, error: nsError) }
+            Task { await self?.handleDidDiscoverCharacteristics(peripheralID: pid, serviceID: serviceID, cbmCharacteristics: cbmChars, characteristics: valueTypes, error: nsError) }
         }
-        weakPeriphDelegate.onDidUpdateValueForCharacteristic = { peripheral, characteristic, error in
+        weakPeriphDelegate.onDidUpdateValueForCharacteristic = { [weak self] peripheral, characteristic, error in
             let pid = peripheral.identifier
             let cid = characteristic.uuid
             let value = characteristic.value ?? Data()
             let nsError = error as NSError?
-            Task { await weakSelf?.handleDidUpdateValue(peripheralID: pid, characteristicID: cid, value: value, error: nsError) }
+            Task { await self?.handleDidUpdateValue(peripheralID: pid, characteristicID: cid, value: value, error: nsError) }
         }
-        weakPeriphDelegate.onDidWriteValueForCharacteristic = { peripheral, characteristic, error in
+        weakPeriphDelegate.onDidWriteValueForCharacteristic = { [weak self] peripheral, characteristic, error in
             let pid = peripheral.identifier
             let cid = characteristic.uuid
             let nsError = error as NSError?
-            Task { await weakSelf?.handleDidWriteValue(peripheralID: pid, characteristicID: cid, error: nsError) }
+            Task { await self?.handleDidWriteValue(peripheralID: pid, characteristicID: cid, error: nsError) }
         }
-        weakPeriphDelegate.onDidUpdateNotificationState = { peripheral, characteristic, error in
+        weakPeriphDelegate.onDidUpdateNotificationState = { [weak self] peripheral, characteristic, error in
             let pid = peripheral.identifier
             let cid = characteristic.uuid
             let nsError = error as NSError?
-            Task { await weakSelf?.handleDidUpdateNotificationState(peripheralID: pid, characteristicID: cid, error: nsError) }
+            Task { await self?.handleDidUpdateNotificationState(peripheralID: pid, characteristicID: cid, error: nsError) }
         }
     }
 
@@ -161,7 +160,7 @@ final actor CentralActor {
     nonisolated func scan(services: [CBUUID]?, options: ScanOptions?) -> AsyncStream<DiscoveredPeripheral> {
         // Wrap in a sendable box so the values can cross actor boundaries under Swift 6.
         nonisolated(unsafe) let servicesCopy: [CBUUID]? = services.map { Array($0) }
-        nonisolated(unsafe) let optionsCopy = options
+        let optionsCopy = options
         return AsyncStream<DiscoveredPeripheral> { continuation in
             Task { await self.startScan(services: servicesCopy, options: optionsCopy, continuation: continuation) }
             continuation.onTermination = { _ in
