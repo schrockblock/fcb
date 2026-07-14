@@ -160,7 +160,7 @@ extension CBMBackedTests {
 
         @Test func connectThrowsWhenPoweredOff() async {
             let actor = await makeEmptyMockActor(state: .poweredOff)
-            await #expect(throws: BluetoothError.self) {
+            await #expect(throws: BluetoothError.poweredOff) {
                 _ = try await actor.connect(id: UUID(), options: nil)
             }
         }
