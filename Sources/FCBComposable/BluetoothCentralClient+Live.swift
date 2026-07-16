@@ -64,6 +64,9 @@ final actor CentralActor {
     private var stateContinuations: [UUID: AsyncStream<CBManagerState>.Continuation] = [:]
     private var eventContinuations: [UUID: AsyncStream<CentralEvent>.Continuation] = [:]
     private var scanContinuation: AsyncStream<DiscoveredPeripheral>.Continuation?
+    /// Token identifying the current active scan. A stale `endScan(token:)` call
+    /// from a superseded scan stream is ignored when its token no longer matches.
+    private var currentScanToken: UUID?
     private var notificationContinuations: [String: AsyncThrowingStream<Data, any Error>.Continuation] = [:]
 
     // Pending operation continuations
@@ -172,10 +175,16 @@ final actor CentralActor {
         // Wrap in a sendable box so the values can cross actor boundaries under Swift 6.
         nonisolated(unsafe) let servicesCopy: [CBUUID]? = services.map { Array($0) }
         let optionsCopy = options
+        // Generate a unique token for this scan instance. The token is passed
+        // to startScan (which records it as the current scan) and captured in
+        // onTermination. endScan(token:) checks that the token still matches
+        // the current scan before stopping — a stale termination from a
+        // superseded stream cannot kill a newer scan.
+        let token = UUID()
         return AsyncStream<DiscoveredPeripheral> { continuation in
-            Task { await self.startScan(services: servicesCopy, options: optionsCopy, continuation: continuation) }
+            Task { await self.startScan(services: servicesCopy, options: optionsCopy, continuation: continuation, token: token) }
             continuation.onTermination = { _ in
-                Task { await self.endScan() }
+                Task { await self.endScan(token: token) }
             }
         }
     }
@@ -194,6 +203,7 @@ final actor CentralActor {
         manager.stopScan()
         scanContinuation?.finish()
         scanContinuation = nil
+        currentScanToken = nil
     }
 
     func connect(id: UUID, options: ConnectOptions?) async throws -> Peripheral {
@@ -360,14 +370,20 @@ final actor CentralActor {
         notificationContinuations.removeValue(forKey: key)
     }
 
-    private func startScan(services: [CBUUID]?, options: ScanOptions?, continuation: AsyncStream<DiscoveredPeripheral>.Continuation) {
+    private func startScan(services: [CBUUID]?, options: ScanOptions?, continuation: AsyncStream<DiscoveredPeripheral>.Continuation, token: UUID) {
         scanContinuation = continuation
+        currentScanToken = token
         manager.scanForPeripherals(withServices: services, options: options?.dictionary)
     }
 
-    private func endScan() {
+    /// Stops the scan and clears the continuation ONLY when the token matches
+    /// the current scan. A stale `endScan` from a superseded stream's
+    /// `onTermination` is ignored — it must not kill a newer active scan.
+    private func endScan(token: UUID) {
+        guard currentScanToken == token else { return }
         manager.stopScan()
         scanContinuation = nil
+        currentScanToken = nil
     }
 
     private func emit(_ event: CentralEvent) {
