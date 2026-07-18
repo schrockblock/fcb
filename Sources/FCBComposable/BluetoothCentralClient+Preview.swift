@@ -31,6 +31,7 @@ extension BluetoothCentralClient {
             readValue: { _, _ in Data() },
             writeValue: { _, _, _, _ in },
             setNotify: { _, _, _ in },
+            maximumWriteValueLength: { _, _ in 512 },
             notifications: { _, _ in AsyncThrowingStream { continuation in
                 continuation.finish()
             } },

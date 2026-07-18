@@ -35,6 +35,7 @@ extension BluetoothCentralClient: DependencyKey {
             readValue: { pid, cid in try await actor.readValue(peripheralID: pid, characteristicID: cid) },
             writeValue: { data, pid, cid, type in try await actor.writeValue(data: data, peripheralID: pid, characteristicID: cid, type: type) },
             setNotify: { enabled, pid, cid in try await actor.setNotify(enabled: enabled, peripheralID: pid, characteristicID: cid) },
+            maximumWriteValueLength: { pid, type in await actor.maximumWriteValueLength(peripheralID: pid, type: type) },
             notifications: { pid, cid in actor.notifications(peripheralID: pid, characteristicID: cid) },
             events: { actor.eventStream() }
         )
@@ -305,6 +306,11 @@ final actor CentralActor {
             pendingNotify[key] = cont
             connection.setNotifyValue(enabled, for: characteristic)
         }
+    }
+
+    func maximumWriteValueLength(peripheralID: UUID, type: CBCharacteristicWriteType) -> Int {
+        guard let connection = peripherals[peripheralID] else { return 0 }
+        return connection.maximumWriteValueLength(for: type)
     }
 
     // MARK: - Private helpers
