@@ -40,6 +40,22 @@ no peripheral-manager mock). Public API keeps CoreBluetooth types; the internal
 
 - `BluetoothCentralClient` — `scan`, `connect`, `discoverServices`, `discoverCharacteristics`, `readValue`, `writeValue`, `setNotify`, `notifications`, plus an escape-hatch `events` stream emitting `CentralEvent`.
 - `BluetoothPeripheralClient` — `add`/`remove` services, `startAdvertising`/`stopAdvertising`, `respond`, `updateValue`, plus streams for read/write requests, subscriptions, and a unified `events` stream emitting `PeripheralManagerEvent`.
+- **L2CAP:** both clients carry L2CAP CoC support. `BluetoothCentralClient.openL2CAPChannel`
+  (native passthrough only — CBM cannot mock L2CAP, so mocked centrals throw
+  `BluetoothError.l2capNotSupported` instead of hitting CBM's fatalError) and
+  `BluetoothPeripheralClient.publishL2CAPChannel`/`unpublishL2CAPChannel`/`l2capConnections`.
+  Both produce `L2CAPConnection` — a Sendable capability handle (single-consumer
+  `incoming()` byte stream + `send`/`close`) backed by the internal `L2CAPChannelPump`,
+  which is unit-tested against bound in-memory stream pairs
+  (`Tests/FCBComposableTests/L2CAPChannelPumpTests.swift`). The peripheral path is fully
+  fake-tested; the central native path is verified on hardware by consumers (ReTiCA).
+- **L2CAP macOS limitation:** CoreBluetoothMock's `CBMPeripheral` protocol declares
+  `openL2CAPChannel` under `#if !os(macOS)`, so the central role's outbound
+  `openL2CAPChannel` is unavailable on macOS through FCB (it throws
+  `BluetoothError.l2capNotSupported`; guarded by `#if os(macOS)` in `CentralActor`).
+  The peripheral role's L2CAP (publish + inbound `l2capConnections`) runs on real
+  CoreBluetooth and IS available on macOS. Net: on macOS a node can accept inbound
+  L2CAP channels but cannot initiate outbound ones via this central path. iOS has both.
 
 Sendable value types (`Peripheral`, `Service`, `Characteristic`, `Central`, `DiscoveredPeripheral`, `AdvertisementData`, `ReadRequest`, `WriteRequest`, etc.) wrap every non-Sendable CoreBluetooth type. `BluetoothError` classifies CoreBluetooth errors by domain/code (`CBErrorDomain`, `CBATTErrorDomain`) with an `.underlying(NSError)` catch-all.
 
