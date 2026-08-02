@@ -37,6 +37,9 @@ extension BluetoothPeripheralClient: DependencyKey {
             isAdvertising: { await actor.isAdvertising() },
             respond: { reqID, result in await actor.respond(requestID: reqID, result: result) },
             updateValue: { data, cid, centralIDs in try await actor.updateValue(data: data, characteristicID: cid, centralIDs: centralIDs) },
+            publishL2CAPChannel: { encryption in try await actor.publishL2CAPChannel(withEncryption: encryption) },
+            unpublishL2CAPChannel: { psm in await actor.unpublishL2CAPChannel(psm: psm) },
+            l2capConnections: { actor.l2capConnectionsStream() },
             readRequests: { actor.readRequestsStream() },
             writeRequests: { actor.writeRequestsStream() },
             subscriptions: { actor.subscriptionsStream() },
@@ -64,6 +67,8 @@ final actor PeripheralRoleActor {
 
     private var pendingAddService: [CBUUID: CheckedContinuation<Service, any Error>] = [:]
     private var pendingStartAdvertising: CheckedContinuation<Void, any Error>?
+    private var pendingPublishL2CAP: CheckedContinuation<UInt16, any Error>?
+    private var l2capConnectionContinuations: [UUID: AsyncStream<L2CAPConnection>.Continuation] = [:]
 
     init(manager: any PeripheralManaging) {
         self.manager = manager
@@ -124,6 +129,22 @@ final actor PeripheralRoleActor {
         }
         delegate.onIsReadyToUpdateSubscribers = { [weak self] _ in
             Task { await self?.handleIsReadyToUpdateSubscribers() }
+        }
+        delegate.onDidPublishL2CAPChannel = { [weak self] _, psm, error in
+            let nsError = error as NSError?
+            let value = UInt16(psm)
+            Task { await self?.handleDidPublishL2CAP(psm: value, error: nsError) }
+        }
+        delegate.onDidOpenL2CAPChannel = { [weak self] _, channel, error in
+            // Extraction shim: pull Sendable metadata + the stream pair out of the
+            // non-instantiable CBL2CAPChannel here; the actor path takes raw pieces
+            // so tests can inject bound pairs directly.
+            guard error == nil, let channel else { return }
+            let peerID = channel.peer.identifier
+            let psm = UInt16(channel.psm)
+            nonisolated(unsafe) let input: InputStream = channel.inputStream
+            nonisolated(unsafe) let output: OutputStream = channel.outputStream
+            Task { await self?.handleInboundL2CAPChannel(peerID: peerID, psm: psm, input: input, output: output) }
         }
     }
 
@@ -356,6 +377,57 @@ final actor PeripheralRoleActor {
 
     func handleIsReadyToUpdateSubscribers() {
         emit(.isReadyToUpdateSubscribers)
+    }
+
+    // MARK: - L2CAP publish/unpublish + inbound connections
+
+    nonisolated func l2capConnectionsStream() -> AsyncStream<L2CAPConnection> {
+        AsyncStream<L2CAPConnection> { continuation in
+            let token = UUID()
+            Task { await self.registerL2CAPContinuation(token, continuation: continuation) }
+            continuation.onTermination = { _ in Task { await self.unregisterL2CAPContinuation(token) } }
+        }
+    }
+
+    func publishL2CAPChannel(withEncryption encryptionRequired: Bool) async throws -> UInt16 {
+        try preflightCheck()
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<UInt16, any Error>) in
+            pendingPublishL2CAP = cont
+            manager.publishL2CAPChannel(withEncryption: encryptionRequired)
+        }
+    }
+
+    func unpublishL2CAPChannel(psm: UInt16) async {
+        manager.unpublishL2CAPChannel(CBL2CAPPSM(psm))
+    }
+
+    private func registerL2CAPContinuation(_ token: UUID, continuation: AsyncStream<L2CAPConnection>.Continuation) {
+        l2capConnectionContinuations[token] = continuation
+    }
+
+    private func unregisterL2CAPContinuation(_ token: UUID) {
+        l2capConnectionContinuations.removeValue(forKey: token)
+    }
+
+    func handleDidPublishL2CAP(psm: UInt16, error: NSError?) {
+        if let cont = pendingPublishL2CAP {
+            pendingPublishL2CAP = nil
+            if let error {
+                cont.resume(throwing: BluetoothError(error))
+            } else {
+                cont.resume(returning: psm)
+            }
+        }
+    }
+
+    func handleInboundL2CAPChannel(peerID: UUID, psm: UInt16, input: InputStream, output: OutputStream) {
+        let pump = L2CAPChannelPump(input: input, output: output)
+        let connection = L2CAPConnection.make(pump: pump, peerID: peerID, psm: psm)
+        for cont in l2capConnectionContinuations.values { cont.yield(connection) }
+    }
+
+    func simulateInboundL2CAPChannelForTest(peerID: UUID, psm: UInt16, input: InputStream, output: OutputStream) {
+        handleInboundL2CAPChannel(peerID: peerID, psm: psm, input: input, output: output)
     }
 
     // MARK: - Test support

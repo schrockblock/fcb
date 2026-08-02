@@ -18,6 +18,10 @@ public struct BluetoothPeripheralClient: Sendable {
     public var respond: @Sendable (_ requestID: UUID, _ result: CBATTError.Code) async -> Void
     public var updateValue: @Sendable (_ data: Data, _ characteristicID: CBUUID, _ centralIDs: [UUID]?) async throws -> Void
 
+    public var publishL2CAPChannel: @Sendable (_ withEncryption: Bool) async throws -> UInt16
+    public var unpublishL2CAPChannel: @Sendable (_ psm: UInt16) async -> Void
+    public var l2capConnections: @Sendable () -> AsyncStream<L2CAPConnection> = { .never }
+
     public var readRequests: @Sendable () -> AsyncStream<ReadRequest> = { .never }
     public var writeRequests: @Sendable () -> AsyncStream<[WriteRequest]> = { .never }
     public var subscriptions: @Sendable () -> AsyncStream<SubscriptionEvent> = { .never }

@@ -13,6 +13,8 @@ protocol PeripheralManaging: AnyObject {
     func stopAdvertising()
     func respond(to request: CBATTRequest, withResult result: CBATTError.Code)
     func updateValue(_ value: Data, for characteristic: CBMutableCharacteristic, onSubscribedCentrals centrals: [CBCentral]?) -> Bool
+    func publishL2CAPChannel(withEncryption encryptionRequired: Bool)
+    func unpublishL2CAPChannel(_ PSM: CBL2CAPPSM)
 }
 
 extension CBPeripheralManager: PeripheralManaging {}

@@ -53,4 +53,25 @@ final class FakePeripheralManager: NSObject, PeripheralManaging, @unchecked Send
     func simulateDidSubscribe(central: CBCentral, characteristic: CBCharacteristic) {
         delegate?.peripheralManager?(unsafeBitCast(self, to: CBPeripheralManager.self), central: central, didSubscribeTo: characteristic)
     }
+
+    // MARK: - L2CAP simulation
+
+    private(set) var publishL2CAPCalls: [Bool] = []
+    private(set) var unpublishL2CAPCalls: [CBL2CAPPSM] = []
+    var nextPublishPSM: CBL2CAPPSM = 0x0081
+    var nextPublishError: NSError?
+
+    func publishL2CAPChannel(withEncryption encryptionRequired: Bool) {
+        publishL2CAPCalls.append(encryptionRequired)
+        delegate?.peripheralManager?(
+            unsafeBitCast(self, to: CBPeripheralManager.self),
+            didPublishL2CAPChannel: nextPublishPSM, error: nextPublishError)
+    }
+
+    func unpublishL2CAPChannel(_ PSM: CBL2CAPPSM) {
+        unpublishL2CAPCalls.append(PSM)
+        delegate?.peripheralManager?(
+            unsafeBitCast(self, to: CBPeripheralManager.self),
+            didUnpublishL2CAPChannel: PSM, error: nil)
+    }
 }
