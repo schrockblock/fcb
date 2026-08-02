@@ -25,9 +25,9 @@ extension BluetoothError: Hashable {
         case .operationCancelled:
             hasher.combine(9)
         case .l2capNotSupported:
-            hasher.combine(11)
+            hasher.combine(10)
         case .underlying(let err):
-            hasher.combine(10); hasher.combine(err)
+            hasher.combine(11); hasher.combine(err)
         }
     }
 }

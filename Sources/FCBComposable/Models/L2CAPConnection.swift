@@ -9,6 +9,8 @@ public struct L2CAPConnection: Sendable, Identifiable {
     public let id: UUID
     public let peerID: UUID
     public let psm: UInt16
+    // `var` (not `let`) is intentional: call sites and tests can substitute
+    // these closures (e.g. to stub I/O) without constructing a new instance.
     public var incoming: @Sendable () -> AsyncStream<Data>
     public var send: @Sendable (Data) async throws -> Void
     public var close: @Sendable () async -> Void
