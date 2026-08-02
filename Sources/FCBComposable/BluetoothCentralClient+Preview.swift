@@ -35,6 +35,7 @@ extension BluetoothCentralClient {
             notifications: { _, _ in AsyncThrowingStream { continuation in
                 continuation.finish()
             } },
+            openL2CAPChannel: { _, _ in throw BluetoothError.l2capNotSupported },
             events: { AsyncStream { continuation in
                 continuation.yield(.didConnect(sample))
                 continuation.finish()

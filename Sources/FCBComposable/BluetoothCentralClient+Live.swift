@@ -37,6 +37,7 @@ extension BluetoothCentralClient: DependencyKey {
             setNotify: { enabled, pid, cid in try await actor.setNotify(enabled: enabled, peripheralID: pid, characteristicID: cid) },
             maximumWriteValueLength: { pid, type in await actor.maximumWriteValueLength(peripheralID: pid, type: type) },
             notifications: { pid, cid in actor.notifications(peripheralID: pid, characteristicID: cid) },
+            openL2CAPChannel: { pid, psm in try await actor.openL2CAPChannel(peripheralID: pid, psm: psm) },
             events: { actor.eventStream() }
         )
     }
@@ -78,6 +79,7 @@ final actor CentralActor {
     private var pendingReads: [String: CheckedContinuation<Data, any Error>] = [:]
     private var pendingWrites: [String: CheckedContinuation<Void, any Error>] = [:]
     private var pendingNotify: [String: CheckedContinuation<Void, any Error>] = [:]
+    private var pendingOpenL2CAP: [UUID: CheckedContinuation<L2CAPConnection, any Error>] = [:]
 
     init(manager: CBMCentralManager) {
         self.manager = manager
@@ -147,6 +149,19 @@ final actor CentralActor {
             let cid = characteristic.uuid
             let nsError = error as NSError?
             Task { await self?.handleDidUpdateNotificationState(peripheralID: pid, characteristicID: cid, error: nsError) }
+        }
+        weakPeriphDelegate.onDidOpenL2CAPChannel = { [weak self] peripheral, channel, error in
+            let pid = peripheral.identifier
+            let nsError = error as NSError?
+            if let channel, nsError == nil {
+                let peerID = channel.peer.identifier
+                let psm = UInt16(channel.psm)
+                nonisolated(unsafe) let input: InputStream = channel.inputStream
+                nonisolated(unsafe) let output: OutputStream = channel.outputStream
+                Task { await self?.handleDidOpenL2CAP(peripheralID: pid, peerID: peerID, psm: psm, input: input, output: output) }
+            } else {
+                Task { await self?.handleDidFailOpenL2CAP(peripheralID: pid, nsError: nsError) }
+            }
         }
     }
 
@@ -311,6 +326,47 @@ final actor CentralActor {
     func maximumWriteValueLength(peripheralID: UUID, type: CBCharacteristicWriteType) -> Int {
         guard let connection = peripherals[peripheralID] else { return 0 }
         return connection.maximumWriteValueLength(for: type)
+    }
+
+    func openL2CAPChannel(peripheralID: UUID, psm: UInt16) async throws -> L2CAPConnection {
+        try preflightCheck()
+        guard let connection = peripherals[peripheralID] else {
+            throw BluetoothError.unknownPeripheral(peripheralID)
+        }
+        // CoreBluetoothMock cannot simulate L2CAP — its openL2CAPChannel is a
+        // fatalError. Fail loudly-but-gracefully instead of crashing the process.
+        guard !(connection is CBMPeripheralMock) else {
+            throw BluetoothError.l2capNotSupported
+        }
+        if pendingOpenL2CAP[peripheralID] != nil {
+            throw BluetoothError.operationCancelled
+        }
+        #if os(macOS)
+        // openL2CAPChannel is unavailable on macOS (not part of CBMPeripheral on
+        // this platform). Non-mock peripherals on macOS fall through here; throw
+        // l2capNotSupported rather than crash or leave the continuation dangling.
+        throw BluetoothError.l2capNotSupported
+        #else
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<L2CAPConnection, any Error>) in
+            pendingOpenL2CAP[peripheralID] = cont
+            connection.openL2CAPChannel(CBML2CAPPSM(psm))
+        }
+        #endif
+    }
+
+    private func handleDidOpenL2CAP(peripheralID: UUID, peerID: UUID, psm: UInt16, input: InputStream, output: OutputStream) {
+        guard let cont = pendingOpenL2CAP.removeValue(forKey: peripheralID) else { return }
+        let pump = L2CAPChannelPump(input: input, output: output)
+        cont.resume(returning: L2CAPConnection.make(pump: pump, peerID: peerID, psm: psm))
+    }
+
+    private func handleDidFailOpenL2CAP(peripheralID: UUID, nsError: NSError?) {
+        guard let cont = pendingOpenL2CAP.removeValue(forKey: peripheralID) else { return }
+        if let nsError {
+            cont.resume(throwing: BluetoothError(nsError))
+        } else {
+            cont.resume(throwing: BluetoothError.operationCancelled)
+        }
     }
 
     // MARK: - Private helpers

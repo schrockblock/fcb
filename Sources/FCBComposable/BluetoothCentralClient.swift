@@ -23,6 +23,7 @@ public struct BluetoothCentralClient: Sendable {
     public var setNotify: @Sendable (_ enabled: Bool, _ peripheralID: UUID, _ characteristicID: CBUUID) async throws -> Void
     public var maximumWriteValueLength: @Sendable (_ peripheralID: UUID, _ type: CBCharacteristicWriteType) async -> Int = { _, _ in 20 }
     public var notifications: @Sendable (_ peripheralID: UUID, _ characteristicID: CBUUID) -> AsyncThrowingStream<Data, any Error> = { _, _ in .finished() }
+    public var openL2CAPChannel: @Sendable (_ peripheralID: UUID, _ psm: UInt16) async throws -> L2CAPConnection
 
     public var events: @Sendable () -> AsyncStream<CentralEvent> = { .never }
 }
