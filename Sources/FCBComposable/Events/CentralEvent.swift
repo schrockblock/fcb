@@ -24,6 +24,8 @@ extension BluetoothError: Hashable {
             hasher.combine(8); hasher.combine(code.rawValue)
         case .operationCancelled:
             hasher.combine(9)
+        case .l2capNotSupported:
+            hasher.combine(11)
         case .underlying(let err):
             hasher.combine(10); hasher.combine(err)
         }

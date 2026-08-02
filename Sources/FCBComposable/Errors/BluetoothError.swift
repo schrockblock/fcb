@@ -12,6 +12,10 @@ public enum BluetoothError: Error, Sendable, Equatable {
     case disconnected(peripheralID: UUID, underlying: NSError?)
     case att(CBATTError.Code)
     case operationCancelled
+    /// L2CAP is unavailable on this transport — thrown instead of crashing when
+    /// a CoreBluetoothMock-backed (mocked) central is asked to open a channel
+    /// (CBM's openL2CAPChannel is an unimplemented fatalError).
+    case l2capNotSupported
     case underlying(NSError)
 }
 
