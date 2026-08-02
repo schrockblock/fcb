@@ -61,6 +61,51 @@ private final class TimedStreamConsumer: @unchecked Sendable {
     }
 }
 
+/// An `OutputStream` that accepts at most `perCall` bytes per `write` while
+/// reporting `hasSpaceAvailable == true` until an in-memory sink fills. This
+/// forces PARTIAL writes: `write(_:maxLength:)` returns fewer bytes than
+/// requested even though the stream is still writable — the exact condition a
+/// real `CBL2CAPChannel` produces but a CFStream-over-socketpair never does.
+/// It exercises the pump's drain LOOP taking a second-and-later iteration inside
+/// a single `send()`, which a break-after-one-write regression strands.
+private final class PartialWritingOutputStream: OutputStream, @unchecked Sendable {
+    private let perCall: Int
+    private let capacity: Int
+    private let lock = NSLock()
+    private var sink = Data()
+
+    init(perCall: Int, capacity: Int) {
+        self.perCall = perCall
+        self.capacity = capacity
+        super.init(toMemory: ())
+    }
+
+    /// Snapshot of everything written so far, in order.
+    var written: Data { lock.lock(); defer { lock.unlock() }; return sink }
+
+    override func open() {}
+    override func close() {}
+    override var delegate: StreamDelegate? {
+        get { nil }
+        set {}
+    }
+    override func schedule(in aRunLoop: RunLoop, forMode mode: RunLoop.Mode) {}
+    override func remove(from aRunLoop: RunLoop, forMode mode: RunLoop.Mode) {}
+
+    override var hasSpaceAvailable: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return sink.count < capacity
+    }
+
+    override func write(_ buffer: UnsafePointer<UInt8>, maxLength len: Int) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        guard sink.count < capacity else { return 0 }
+        let n = min(len, perCall, capacity - sink.count)
+        sink.append(UnsafeBufferPointer(start: buffer, count: n))
+        return n
+    }
+}
+
 /// A socketpair-backed stream pair for the pump plus a raw peer fd for the test.
 /// Socket-backed CFStreams re-arm `hasSpaceAvailable` under dispatch-queue
 /// scheduling exactly like a real `CBL2CAPChannel`, so the production code runs
@@ -217,5 +262,42 @@ struct L2CAPChannelPumpTests {
         let next = await second.next()
         #expect(next == .finished)
         harness.pump.close()
+    }
+
+    /// Covers the drain LOOP's multi-iteration path directly: the output stream
+    /// accepts only 1 byte per `write` while staying writable, so a single
+    /// `send()` must loop many times to flush the payload. A break-after-one-write
+    /// regression strands all but the first byte. (Uses a custom OutputStream so
+    /// it does not depend on socket write-chunking, which the other tests use.)
+    @Test func drainLoopFlushesPartialWritesWithinOneSend() async throws {
+        // Real CFStream input (never fed) so the pump's input side is valid.
+        var fds: [Int32] = [0, 0]
+        precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        var readStream: Unmanaged<CFReadStream>?
+        var writeStreamUnused: Unmanaged<CFWriteStream>?
+        CFStreamCreatePairWithSocket(kCFAllocatorDefault, fds[0], &readStream, &writeStreamUnused)
+        let cfRead = readStream!.takeRetainedValue()
+        writeStreamUnused?.release()
+        CFReadStreamSetProperty(cfRead, CFStreamPropertyKey(rawValue: kCFStreamPropertyShouldCloseNativeSocket), kCFBooleanTrue)
+        let input = cfRead as InputStream
+
+        let payload = Data((0..<500).map { UInt8($0 % 251) })
+        let partial = PartialWritingOutputStream(perCall: 1, capacity: payload.count)
+        let pump = L2CAPChannelPump(input: input, output: partial)
+        pump.open()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        try pump.send(payload)
+
+        // Poll the sink with a bounded timeout, mirroring the other tests.
+        var got = Data()
+        for _ in 0..<400 {
+            got = partial.written
+            if got.count >= payload.count { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(got == payload)
+        pump.close()
+        Darwin.close(fds[1])
     }
 }
