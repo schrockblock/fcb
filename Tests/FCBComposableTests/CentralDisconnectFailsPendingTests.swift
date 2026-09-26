@@ -122,12 +122,90 @@ final class PendingOpsSpecDelegate: CBMPeripheralSpecDelegate, @unchecked Sendab
 final class CountingCentralManagerMock: CBMCentralManagerMock, @unchecked Sendable {
     private let lock = NSLock()
     private var _cancelCount = 0
+    private var _ignoresCancel = false
 
     var cancelCount: Int { lock.withLock { _cancelCount } }
 
+    /// When `true` a cancel is counted but not forwarded, so no callback
+    /// follows. Models CoreBluetooth ignoring a cancel that races a connect
+    /// which has already failed (CBM itself always answers a cancel of a
+    /// connecting peripheral with `didDisconnect`).
+    var ignoresCancel: Bool {
+        get { lock.withLock { _ignoresCancel } }
+        set { lock.withLock { _ignoresCancel = newValue } }
+    }
+
     override func cancelPeripheralConnection(_ peripheral: CBMPeripheral) {
         lock.withLock { _cancelCount += 1 }
+        guard !ignoresCancel else { return }
         super.cancelPeripheralConnection(peripheral)
+    }
+}
+
+/// Spec delegate that refuses every connection request, so CBM reports
+/// `didFailToConnect` one connection interval after the connect is attempted.
+final class RefusingConnectionSpecDelegate: CBMPeripheralSpecDelegate, @unchecked Sendable {
+    func peripheralDidReceiveConnectionRequest(_ peripheral: CBMPeripheralSpec) -> Result<Void, any Error> {
+        .failure(CBMError(.connectionFailed))
+    }
+}
+
+/// How long CBM takes to report the refused connection.
+let failingConnectLatency: TimeInterval = 0.3
+
+/// A connectable, advertising peripheral whose connection attempts fail,
+/// behind a `CountingCentralManagerMock` that ignores cancels.
+@MainActor
+func makeFailingConnectRig() async -> (client: BluetoothCentralClient, manager: CountingCentralManagerMock, id: UUID) {
+    CBMCentralManagerMock.tearDownSimulation()
+    CBMCentralManagerMock.simulateInitialState(.poweredOn)
+    let id = UUID()
+    let spec = CBMPeripheralSpec
+        .simulatePeripheral(identifier: id, proximity: .near)
+        .advertising(advertisementData: [
+            CBMAdvertisementDataLocalNameKey: "RefusingDev",
+            CBMAdvertisementDataIsConnectable: NSNumber(value: true),
+        ], withInterval: 0.05)
+        .connectable(name: "RefusingDev", services: [], delegate: RefusingConnectionSpecDelegate(),
+                     connectionInterval: failingConnectLatency)
+        .allowForRetrieval()
+        .build()
+    CBMCentralManagerMock.simulatePeripherals([spec])
+    let manager = CountingCentralManagerMock()
+    manager.ignoresCancel = true
+    await waitForManagerState(manager, toReach: .poweredOn)
+    return (BluetoothCentralClient.makeClient(actor: CentralActor(manager: manager)), manager, id)
+}
+
+/// Asserts that a bounded operation completed without throwing.
+func expectCompleted<T>(
+    _ result: Result<T, any Error>?,
+    _ what: String,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    switch result {
+    case .none:
+        Issue.record("\(what) was still pending after 2 s", sourceLocation: sourceLocation)
+    case .failure(let error)?:
+        Issue.record("\(what) threw \(error)", sourceLocation: sourceLocation)
+    case .success?:
+        break
+    }
+}
+
+/// Asserts that a bounded operation ended by throwing exactly `expected`.
+func expectThrows<T>(
+    _ result: Result<T, any Error>?,
+    _ expected: BluetoothError,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    switch result {
+    case .none:
+        Issue.record("operation was still pending after 2 s", sourceLocation: sourceLocation)
+    case .success?:
+        Issue.record("expected \(expected), but the operation succeeded", sourceLocation: sourceLocation)
+    case .failure(let error)?:
+        #expect(error as? BluetoothError == expected, sourceLocation: sourceLocation)
     }
 }
 
@@ -326,6 +404,111 @@ extension CBMBackedTests {
                 break
             }
             expectDisconnected(await connect.value, id: id)
+        }
+
+        // MARK: Disconnect never queues behind a peripheral that is not connected
+
+        @Test func disconnectOfANeverConnectedPeripheralReturnsAtOnce() async throws {
+            let rig = await makePendingOpsRig(makeManager: { CountingCentralManagerMock() })
+            let manager = try #require(rig.manager as? CountingCentralManagerMock)
+            let client = rig.client
+            let id = rig.id
+            // Retrieved, so the actor knows it, but never connected.
+            #expect(await client.retrievePeripherals([id]).map(\.id) == [id])
+            let counter = DisconnectEventCounter(client: client, id: id)
+            defer { counter.stop() }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+
+            expectCompleted(await outcome(within: 2) { try await client.disconnect(id) },
+                            "disconnect of a never-connected peripheral")
+
+            // Give any (erroneous) disconnection time to be delivered.
+            try? await Task.sleep(nanoseconds: UInt64((pendingOpsResponseLatency + 0.2) * 1_000_000_000))
+            #expect(counter.count == 0)
+            #expect(manager.cancelCount == 0)
+        }
+
+        @Test func disconnectAfterReconnectStillCancels() async throws {
+            let rig = await makePendingOpsRig(makeManager: { CountingCentralManagerMock() })
+            let manager = try #require(rig.manager as? CountingCentralManagerMock)
+            let client = rig.client
+            let id = rig.id
+            // First a disconnect of the retrieved-but-not-connected peripheral:
+            // the call that used to leave a stuck waiter behind for `id`.
+            _ = await client.retrievePeripherals([id])
+            expectCompleted(await outcome(within: 2) { try await client.disconnect(id) },
+                            "disconnect before any connect")
+
+            for round in 1...2 {
+                expectCompleted(await outcome(within: 2) { _ = try await client.connect(id, ConnectOptions?.none) },
+                                "connect #\(round)")
+                expectCompleted(await outcome(within: 2) { try await client.disconnect(id) },
+                                "disconnect #\(round)")
+            }
+            // One cancel per connected round; none for the never-connected one.
+            #expect(manager.cancelCount == 2)
+        }
+
+        @Test func disconnectDuringFailedConnectResumes() async throws {
+            // CBM fails the connect (the spec delegate refuses it) one connection
+            // interval after the first advertisement; the cancel issued while
+            // connecting gets no callback (see `CountingCentralManagerMock.ignoresCancel`),
+            // so only `didFailToConnect` can release the disconnect.
+            let (client, manager, id) = await makeFailingConnectRig()
+
+            let connect = Task { await outcome(within: 2) { try await client.connect(id, ConnectOptions?.none) } }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            let disconnect = await outcome(within: 2) { try await client.disconnect(id) }
+
+            expectCompleted(disconnect, "disconnect during a connect that then fails")
+            // The disconnect ran while the peripheral was still connecting.
+            #expect(manager.cancelCount == 1)
+            switch await connect.value {
+            case .none:
+                Issue.record("connect was still pending after 2 s")
+            case .success?:
+                Issue.record("expected the refused connect to fail")
+            case .failure(let error)?:
+                guard case .connectionFailed(let peripheralID, _)? = error as? BluetoothError else {
+                    Issue.record("expected BluetoothError.connectionFailed, got \(error)")
+                    return
+                }
+                #expect(peripheralID == id)
+            }
+        }
+
+        // MARK: Notification streams for a peripheral that is gone
+
+        @Test func notificationStreamForANeverConnectedPeripheralEnds() async {
+            let rig = await makePendingOpsRig()
+            let stream = rig.client.notifications(rig.id, cbmBatteryLevelUUID)
+
+            let iteration = await outcome(within: 2) {
+                for try await _ in stream {}
+                return true
+            }
+            expectThrows(iteration, .unknownPeripheral(rig.id))
+        }
+
+        @Test func notificationStreamCreatedAfterDisconnectEnds() async throws {
+            let rig = await makePendingOpsRig()
+            try await rig.connectAndDiscover()
+            let counter = DisconnectEventCounter(client: rig.client, id: rig.id)
+            defer { counter.stop() }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            rig.simulateLinkLoss()
+            for _ in 0..<200 {
+                if counter.count > 0 { break }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            #expect(counter.count == 1)
+
+            let stream = rig.client.notifications(rig.id, cbmBatteryLevelUUID)
+            let iteration = await outcome(within: 2) {
+                for try await _ in stream {}
+                return true
+            }
+            expectThrows(iteration, .unknownPeripheral(rig.id))
         }
     }
 }

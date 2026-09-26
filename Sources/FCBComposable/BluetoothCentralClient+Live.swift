@@ -215,7 +215,7 @@ final actor CentralActor {
     nonisolated func notifications(peripheralID: UUID, characteristicID: CBUUID) -> AsyncThrowingStream<Data, any Error> {
         AsyncThrowingStream<Data, any Error> { continuation in
             let key = "\(peripheralID.uuidString):\(characteristicID.uuidString)"
-            Task { await self.registerNotificationContinuation(key: key, continuation: continuation) }
+            Task { await self.registerNotificationContinuation(peripheralID: peripheralID, key: key, continuation: continuation) }
             continuation.onTermination = { _ in
                 Task { await self.unregisterNotificationContinuation(key: key) }
             }
@@ -249,6 +249,11 @@ final actor CentralActor {
         guard let connection = peripherals[id] else {
             throw BluetoothError.unknownPeripheral(id)
         }
+        // `peripherals` also holds discovered, retrieved and failed-to-connect
+        // peripherals. Cancelling one that is not connected gets no callback
+        // from CoreBluetooth (or CBM), so waiting would hang — and, as the first
+        // caller, would make every later disconnect of `id` join that hang.
+        guard connection.state != .disconnected else { return }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
             // A concurrent second caller joins the in-flight disconnect and
             // shares its outcome; only the first caller cancels the connection.
@@ -440,7 +445,13 @@ final actor CentralActor {
         eventContinuations.removeValue(forKey: token)
     }
 
-    private func registerNotificationContinuation(key: String, continuation: AsyncThrowingStream<Data, any Error>.Continuation) {
+    private func registerNotificationContinuation(peripheralID: UUID, key: String, continuation: AsyncThrowingStream<Data, any Error>.Continuation) {
+        // A stream created after the peripheral is gone (or whose registration
+        // lands after the disconnect sweep) would otherwise never end.
+        guard peripherals[peripheralID] != nil else {
+            continuation.finish(throwing: BluetoothError.unknownPeripheral(peripheralID))
+            return
+        }
         notificationContinuations[key] = continuation
     }
 
@@ -502,6 +513,12 @@ final actor CentralActor {
         let err = BluetoothError.connectionFailed(peripheralID: id, underlying: nsError)
         emit(.didFailToConnect(mapped, err))
         failPending(for: id, with: err)
+        // A disconnect issued while connecting whose cancel CoreBluetooth
+        // ignored (the connect had already failed): the link is down, which
+        // is what the caller wanted.
+        for cont in pendingDisconnect.removeValue(forKey: id) ?? [] {
+            cont.resume()
+        }
     }
 
     private func handleDidDisconnect(peripheral: any CBMPeripheral, nsError: NSError?) {
