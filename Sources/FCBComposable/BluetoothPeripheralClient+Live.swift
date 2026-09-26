@@ -144,7 +144,10 @@ final actor PeripheralRoleActor {
             let psm = UInt16(channel.psm)
             nonisolated(unsafe) let input: InputStream = channel.inputStream
             nonisolated(unsafe) let output: OutputStream = channel.outputStream
-            Task { await self?.handleInboundL2CAPChannel(peerID: peerID, psm: psm, input: input, output: output) }
+            // The channel object must outlive the streams: CoreBluetooth closes
+            // the channel when it is deallocated. The pump owns it.
+            let owner = RetainedObject(channel)
+            Task { await self?.handleInboundL2CAPChannel(peerID: peerID, psm: psm, input: input, output: output, retaining: owner) }
         }
     }
 
@@ -420,8 +423,9 @@ final actor PeripheralRoleActor {
         }
     }
 
-    func handleInboundL2CAPChannel(peerID: UUID, psm: UInt16, input: InputStream, output: OutputStream) {
-        let pump = L2CAPChannelPump(input: input, output: output)
+    func handleInboundL2CAPChannel(peerID: UUID, psm: UInt16, input: InputStream, output: OutputStream,
+                                   retaining owner: RetainedObject? = nil) {
+        let pump = L2CAPChannelPump(input: input, output: output, retaining: owner)
         let connection = L2CAPConnection.make(pump: pump, peerID: peerID, psm: psm)
         for cont in l2capConnectionContinuations.values { cont.yield(connection) }
     }

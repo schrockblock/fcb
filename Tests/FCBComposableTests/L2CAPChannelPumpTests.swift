@@ -300,4 +300,32 @@ struct L2CAPChannelPumpTests {
         pump.close()
         Darwin.close(fds[1])
     }
+
+    /// CoreBluetooth closes an L2CAP channel when its `CBL2CAPChannel` object is
+    /// deallocated, so the pump must own that object for as long as it pumps the
+    /// channel's streams, and let it go once the channel is finished.
+    @Test func retainsTheChannelOwnerUntilClosed() async throws {
+        var fds: [Int32] = [0, 0]
+        precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        var readStream: Unmanaged<CFReadStream>?
+        var writeStream: Unmanaged<CFWriteStream>?
+        CFStreamCreatePairWithSocket(kCFAllocatorDefault, fds[0], &readStream, &writeStream)
+        let input = readStream!.takeRetainedValue() as InputStream
+        let output = writeStream!.takeRetainedValue() as OutputStream
+
+        final class ChannelStandIn {}
+        weak var weakOwner: ChannelStandIn?
+        let pump: L2CAPChannelPump
+        do {
+            let owner = ChannelStandIn()
+            weakOwner = owner
+            pump = L2CAPChannelPump(input: input, output: output, retaining: RetainedObject(owner))
+        }
+        #expect(weakOwner != nil, "the pump must keep the channel object alive while it pumps")
+
+        pump.close()
+        #expect(weakOwner == nil, "finishing the channel releases the channel object")
+        Darwin.close(fds[0])
+        Darwin.close(fds[1])
+    }
 }

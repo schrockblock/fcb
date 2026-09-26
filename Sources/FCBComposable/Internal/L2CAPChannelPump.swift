@@ -1,5 +1,12 @@
 import Foundation
 
+/// A strong reference to a non-Sendable object (a `CBL2CAPChannel`) that is only
+/// ever held, never used, so it can cross into the pump from the delegate callback.
+struct RetainedObject: @unchecked Sendable {
+    let object: AnyObject
+    init(_ object: AnyObject) { self.object = object }
+}
+
 /// Pumps one L2CAP channel's stream pair. Ported from ReTiCA's review-hardened
 /// ChannelIO. All state is confined to `queue`: CFStream events are scheduled
 /// onto it and the public methods hop onto it (send/close use queue.sync — they
@@ -9,6 +16,10 @@ final class L2CAPChannelPump: NSObject, StreamDelegate, @unchecked Sendable {
     private let input: InputStream
     private let output: OutputStream
     private let queue: DispatchQueue
+    // CoreBluetooth closes an L2CAP channel when its CBL2CAPChannel is deallocated,
+    // and the channel object is the only thing keeping the stream pair alive. The
+    // pump owns it for exactly as long as it pumps the streams.
+    private var retained: RetainedObject?
 
     // All mutable state is confined to `queue`.
     private var outBuffer = Data()
@@ -17,10 +28,13 @@ final class L2CAPChannelPump: NSObject, StreamDelegate, @unchecked Sendable {
     private var incomingTaken = false
     private var preBuffer: [Data] = []   // inbound chunks before a consumer attaches
 
-    init(input: InputStream, output: OutputStream,
+    /// `retaining`: the object that owns the stream pair (the `CBL2CAPChannel`),
+    /// held until the channel finishes. Tests that drive a bare socket pair pass nothing.
+    init(input: InputStream, output: OutputStream, retaining owner: RetainedObject? = nil,
          queue: DispatchQueue = DispatchQueue(label: "fcb.l2cap.pump")) {
         self.input = input
         self.output = output
+        self.retained = owner
         self.queue = queue
     }
 
@@ -128,5 +142,6 @@ final class L2CAPChannelPump: NSObject, StreamDelegate, @unchecked Sendable {
         output.delegate = nil
         incomingContinuation?.finish()
         incomingContinuation = nil
+        retained = nil
     }
 }

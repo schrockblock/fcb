@@ -161,7 +161,10 @@ final actor CentralActor {
                 let psm = UInt16(channel.psm)
                 nonisolated(unsafe) let input: InputStream = channel.inputStream
                 nonisolated(unsafe) let output: OutputStream = channel.outputStream
-                Task { await self?.handleDidOpenL2CAP(peripheralID: pid, peerID: peerID, psm: psm, input: input, output: output) }
+                // The channel object must outlive the streams: CoreBluetooth closes
+                // the channel when it is deallocated. The pump owns it.
+                let owner = RetainedObject(channel)
+                Task { await self?.handleDidOpenL2CAP(peripheralID: pid, peerID: peerID, psm: psm, input: input, output: output, retaining: owner) }
             } else {
                 Task { await self?.handleDidFailOpenL2CAP(peripheralID: pid, nsError: nsError) }
             }
@@ -375,9 +378,10 @@ final actor CentralActor {
         #endif
     }
 
-    private func handleDidOpenL2CAP(peripheralID: UUID, peerID: UUID, psm: UInt16, input: InputStream, output: OutputStream) {
+    private func handleDidOpenL2CAP(peripheralID: UUID, peerID: UUID, psm: UInt16, input: InputStream, output: OutputStream,
+                                    retaining owner: RetainedObject? = nil) {
         guard let cont = pendingOpenL2CAP.removeValue(forKey: peripheralID) else { return }
-        let pump = L2CAPChannelPump(input: input, output: output)
+        let pump = L2CAPChannelPump(input: input, output: output, retaining: owner)
         cont.resume(returning: L2CAPConnection.make(pump: pump, peerID: peerID, psm: psm))
     }
 
