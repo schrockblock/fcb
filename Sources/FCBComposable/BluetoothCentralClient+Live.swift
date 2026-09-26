@@ -73,7 +73,9 @@ final actor CentralActor {
 
     // Pending operation continuations
     private var pendingConnect: [UUID: CheckedContinuation<Peripheral, any Error>] = [:]
-    private var pendingDisconnect: [UUID: CheckedContinuation<Void, any Error>] = [:]
+    /// Every caller waiting on a disconnect of that peripheral; all resume on
+    /// the one `didDisconnect`.
+    private var pendingDisconnect: [UUID: [CheckedContinuation<Void, any Error>]] = [:]
     private var pendingDiscoverServices: [UUID: CheckedContinuation<[Service], any Error>] = [:]
     private var pendingDiscoverCharacteristics: [String: CheckedContinuation<[Characteristic], any Error>] = [:]
     private var pendingReads: [String: CheckedContinuation<Data, any Error>] = [:]
@@ -243,8 +245,13 @@ final actor CentralActor {
             throw BluetoothError.unknownPeripheral(id)
         }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
-            pendingDisconnect[id] = cont
-            manager.cancelPeripheralConnection(connection)
+            // A concurrent second caller joins the in-flight disconnect and
+            // shares its outcome; only the first caller cancels the connection.
+            let isFirstCaller = pendingDisconnect[id, default: []].isEmpty
+            pendingDisconnect[id, default: []].append(cont)
+            if isFirstCaller {
+                manager.cancelPeripheralConnection(connection)
+            }
         }
     }
 
@@ -485,9 +492,7 @@ final actor CentralActor {
         let mapped = Peripheral(peripheral)
         let err = BluetoothError.connectionFailed(peripheralID: id, underlying: nsError)
         emit(.didFailToConnect(mapped, err))
-        if let cont = pendingConnect.removeValue(forKey: id) {
-            cont.resume(throwing: err)
-        }
+        failPending(for: id, with: err)
     }
 
     private func handleDidDisconnect(peripheral: any CBMPeripheral, nsError: NSError?) {
@@ -496,12 +501,43 @@ final actor CentralActor {
         peripherals.removeValue(forKey: id)
         let btError = nsError.map { BluetoothError.disconnected(peripheralID: id, underlying: $0) }
         emit(.didDisconnect(mapped, btError))
-        if let cont = pendingDisconnect.removeValue(forKey: id) {
+        failPending(for: id, with: .disconnected(peripheralID: id, underlying: nsError))
+        for cont in pendingDisconnect.removeValue(forKey: id) ?? [] {
             if let btError {
                 cont.resume(throwing: btError)
             } else {
                 cont.resume()
             }
+        }
+    }
+
+    /// The peripheral is gone: fail every operation still waiting on it with
+    /// `error`, end its notification streams, and drop its cached
+    /// characteristics (stale after a reconnect; discovery re-populates them).
+    /// Nothing may stay suspended for a peripheral that is no longer connected.
+    /// `pendingDisconnect` is not touched — `handleDidDisconnect` resolves it.
+    private func failPending(for id: UUID, with error: BluetoothError) {
+        let prefix = "\(id.uuidString):"
+        pendingConnect.removeValue(forKey: id)?.resume(throwing: error)
+        pendingDiscoverServices.removeValue(forKey: id)?.resume(throwing: error)
+        pendingOpenL2CAP.removeValue(forKey: id)?.resume(throwing: error)
+        for key in pendingDiscoverCharacteristics.keys where key.hasPrefix(prefix) {
+            pendingDiscoverCharacteristics.removeValue(forKey: key)?.resume(throwing: error)
+        }
+        for key in pendingReads.keys where key.hasPrefix(prefix) {
+            pendingReads.removeValue(forKey: key)?.resume(throwing: error)
+        }
+        for key in pendingWrites.keys where key.hasPrefix(prefix) {
+            pendingWrites.removeValue(forKey: key)?.resume(throwing: error)
+        }
+        for key in pendingNotify.keys where key.hasPrefix(prefix) {
+            pendingNotify.removeValue(forKey: key)?.resume(throwing: error)
+        }
+        for key in notificationContinuations.keys where key.hasPrefix(prefix) {
+            notificationContinuations.removeValue(forKey: key)?.finish(throwing: error)
+        }
+        for key in characteristics.keys where key.hasPrefix(prefix) {
+            characteristics.removeValue(forKey: key)
         }
     }
 
