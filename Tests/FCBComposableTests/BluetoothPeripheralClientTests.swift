@@ -206,4 +206,23 @@ struct BluetoothPeripheralClientRequestsTests {
             Issue.record("expected .subscribed, got \(String(describing: event))")
         }
     }
+
+    @Test func updateValueReturnsManagerResult() async throws {
+        let fake = FakePeripheralManager()
+        let actor = PeripheralRoleActor(manager: fake)
+        try? await Task.sleep(nanoseconds: 50_000_000)   // let wireDelegate run
+        let svc = MutableService(id: CBUUID(string: "180F"), isPrimary: true, characteristics: [
+            MutableCharacteristic(id: CBUUID(string: "2A19"), properties: .notify, permissions: .readable, value: nil)
+        ])
+        async let added = actor.add(service: svc)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        fake.simulateDidAddService(fake.addedServices[0])
+        _ = try await added
+
+        fake.nextUpdateValueResult = true
+        #expect(try await actor.updateValue(data: Data([1]), characteristicID: CBUUID(string: "2A19"), centralIDs: nil) == true)
+        fake.nextUpdateValueResult = false
+        #expect(try await actor.updateValue(data: Data([2]), characteristicID: CBUUID(string: "2A19"), centralIDs: nil) == false)
+        #expect(fake.updateValueCalls.count == 2)
+    }
 }

@@ -23,7 +23,7 @@ extension BluetoothPeripheralClient {
             stopAdvertising: { },
             isAdvertising: { true },
             respond: { _, _ in },
-            updateValue: { _, _, _ in },
+            updateValue: { _, _, _ in true },
             publishL2CAPChannel: { _ in 0x0081 },
             unpublishL2CAPChannel: { _ in },
             l2capConnections: { .never },

@@ -29,9 +29,10 @@ final class FakePeripheralManager: NSObject, PeripheralManaging, @unchecked Send
     func respond(to request: CBATTRequest, withResult result: CBATTError.Code) {
         respondCalls.append((request, result))
     }
+    var nextUpdateValueResult = true
     func updateValue(_ value: Data, for characteristic: CBMutableCharacteristic, onSubscribedCentrals centrals: [CBCentral]?) -> Bool {
         updateValueCalls.append((value, characteristic, centrals))
-        return true
+        return nextUpdateValueResult
     }
 
     func simulateDidUpdateState(_ newState: CBManagerState) {

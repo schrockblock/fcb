@@ -16,7 +16,7 @@ public struct BluetoothPeripheralClient: Sendable {
     public var isAdvertising: @Sendable () async -> Bool = { false }
 
     public var respond: @Sendable (_ requestID: UUID, _ result: CBATTError.Code) async -> Void
-    public var updateValue: @Sendable (_ data: Data, _ characteristicID: CBUUID, _ centralIDs: [UUID]?) async throws -> Void
+    public var updateValue: @Sendable (_ data: Data, _ characteristicID: CBUUID, _ centralIDs: [UUID]?) async throws -> Bool
 
     public var publishL2CAPChannel: @Sendable (_ withEncryption: Bool) async throws -> UInt16
     public var unpublishL2CAPChannel: @Sendable (_ psm: UInt16) async -> Void

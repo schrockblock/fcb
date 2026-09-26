@@ -257,13 +257,13 @@ final actor PeripheralRoleActor {
         manager.respond(to: cbReq, withResult: result)
     }
 
-    func updateValue(data: Data, characteristicID: CBUUID, centralIDs: [UUID]?) async throws {
+    func updateValue(data: Data, characteristicID: CBUUID, centralIDs: [UUID]?) async throws -> Bool {
         try preflightCheck()
         guard let char = characteristics[characteristicID] else {
             throw BluetoothError.unknownCharacteristic(characteristicID, serviceID: CBUUID())
         }
         let cbCentrals: [CBCentral]? = centralIDs?.compactMap { centrals[$0] }
-        _ = manager.updateValue(data, for: char, onSubscribedCentrals: cbCentrals)
+        return manager.updateValue(data, for: char, onSubscribedCentrals: cbCentrals)
     }
 
     // MARK: - Private registration helpers
