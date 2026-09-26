@@ -36,6 +36,7 @@ final class FCBMPeripheralDelegate: NSObject, CBMPeripheralDelegate {
     var onDidWriteValueForCharacteristic: (@Sendable (CBMPeripheral, CBMCharacteristic, Error?) -> Void)?
     var onDidUpdateNotificationState: (@Sendable (CBMPeripheral, CBMCharacteristic, Error?) -> Void)?
     var onDidOpenL2CAPChannel: (@Sendable (CBMPeripheral, CBML2CAPChannel?, Error?) -> Void)?
+    var onIsReadyToSendWriteWithoutResponse: (@Sendable (CBMPeripheral) -> Void)?
 
     func peripheral(_ peripheral: CBMPeripheral, didDiscoverServices error: Error?) {
         onDidDiscoverServices?(peripheral, error)
@@ -55,5 +56,9 @@ final class FCBMPeripheralDelegate: NSObject, CBMPeripheralDelegate {
 
     func peripheral(_ peripheral: CBMPeripheral, didOpen channel: CBML2CAPChannel?, error: Error?) {
         onDidOpenL2CAPChannel?(peripheral, channel, error)
+    }
+
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBMPeripheral) {
+        onIsReadyToSendWriteWithoutResponse?(peripheral)
     }
 }

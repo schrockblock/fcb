@@ -40,6 +40,7 @@ no peripheral-manager mock). Public API keeps CoreBluetooth types; the internal
 
 - `BluetoothCentralClient` — `scan`, `connect`, `discoverServices`, `discoverCharacteristics`, `readValue`, `writeValue`, `setNotify`, `notifications`, plus an escape-hatch `events` stream emitting `CentralEvent`.
 - **Disconnect semantics:** when a peripheral disconnects (or fails to connect), `CentralActor.failPending(for:with:)` throws `BluetoothError.disconnected` (resp. `.connectionFailed`) into every operation still pending for it (connect, discovery, reads, writes, set-notify, L2CAP open), finishes its `notifications` streams with that error and drops its cached characteristics; concurrent `disconnect` calls share one `cancelPeripheralConnection` and all return.
+- **Write-without-response readiness:** `BluetoothCentralClient.canSendWriteWithoutResponse(id)` (the client's LAST property, default `{ _ in true }`) reads the peripheral's `canSendWriteWithoutResponse` (`false` for an unknown id); `peripheralIsReady(toSendWriteWithoutResponse:)` is surfaced as `CentralEvent.isReadyToSendWriteWithoutResponse` on `events`.
 - `BluetoothPeripheralClient` — `add`/`remove` services, `startAdvertising`/`stopAdvertising`, `respond`, `updateValue`, plus streams for read/write requests, subscriptions, and a unified `events` stream emitting `PeripheralManagerEvent`.
 - **L2CAP:** both clients carry L2CAP CoC support. `BluetoothCentralClient.openL2CAPChannel`
   (native passthrough only — CBM cannot mock L2CAP, so mocked centrals throw

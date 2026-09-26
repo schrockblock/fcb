@@ -39,7 +39,8 @@ extension BluetoothCentralClient {
             events: { AsyncStream { continuation in
                 continuation.yield(.didConnect(sample))
                 continuation.finish()
-            } }
+            } },
+            canSendWriteWithoutResponse: { _ in true }
         )
     }()
 }

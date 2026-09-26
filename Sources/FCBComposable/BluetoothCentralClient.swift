@@ -26,6 +26,13 @@ public struct BluetoothCentralClient: Sendable {
     public var openL2CAPChannel: @Sendable (_ peripheralID: UUID, _ psm: UInt16) async throws -> L2CAPConnection
 
     public var events: @Sendable () -> AsyncStream<CentralEvent> = { .never }
+
+    /// Whether the peripheral can accept a write-without-response right now
+    /// (CoreBluetooth's `canSendWriteWithoutResponse`); `false` for an unknown
+    /// peripheral. When it is `false`, wait for
+    /// `CentralEvent.isReadyToSendWriteWithoutResponse` on `events`.
+    /// Kept LAST so memberwise call sites only append one argument.
+    public var canSendWriteWithoutResponse: @Sendable (_ peripheralID: UUID) async -> Bool = { _ in true }
 }
 
 extension BluetoothCentralClient: TestDependencyKey {

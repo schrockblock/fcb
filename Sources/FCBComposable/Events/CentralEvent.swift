@@ -40,6 +40,9 @@ public enum CentralEvent: Sendable, Hashable {
     case didFailToConnect(Peripheral, BluetoothError)
     case didDisconnect(Peripheral, BluetoothError?)
     case didDisconnectWithTimestamp(Peripheral, timestamp: Date, isReconnecting: Bool, BluetoothError?)
+    /// The peripheral's write-without-response queue has room again
+    /// (`peripheralIsReady(toSendWriteWithoutResponse:)`).
+    case isReadyToSendWriteWithoutResponse(Peripheral)
     #if !os(macOS)
     case connectionEventDidOccur(CBConnectionEvent, Peripheral)
     case didUpdateANCSAuthorization(Peripheral)

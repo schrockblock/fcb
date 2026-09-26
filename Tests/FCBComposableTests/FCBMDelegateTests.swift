@@ -50,5 +50,25 @@ extension CBMBackedTests {
             delegate.peripheral(peripheral, didUpdateValueFor: characteristic, error: nil)
             #expect(receivedID == CBMUUID(string: "2A19"))
         }
+
+        @Test func peripheralDelegateForwardsIsReadyToSendWriteWithoutResponse() async {
+            CBMCentralManagerMock.tearDownSimulation()
+            CBMCentralManagerMock.simulateInitialState(.poweredOn)
+            let id = UUID()
+            let spec = CBMPeripheralSpec
+                .simulatePeripheral(identifier: id)
+                .connectable(name: "WrapperDev", services: [], delegate: nil)
+                .allowForRetrieval()
+                .build()
+            CBMCentralManagerMock.simulatePeripherals([spec])
+            let manager = CBMCentralManagerFactory.instance(forceMock: true)
+            await waitForManagerState(manager, toReach: .poweredOn)
+            let peripheral = manager.retrievePeripherals(withIdentifiers: [id]).first!
+            let delegate = FCBMPeripheralDelegate()
+            nonisolated(unsafe) var receivedID: UUID?
+            delegate.onIsReadyToSendWriteWithoutResponse = { p in receivedID = p.identifier }
+            delegate.peripheralIsReady(toSendWriteWithoutResponse: peripheral)
+            #expect(receivedID == id)
+        }
     }
 }

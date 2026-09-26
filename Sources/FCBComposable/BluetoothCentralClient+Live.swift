@@ -38,7 +38,8 @@ extension BluetoothCentralClient: DependencyKey {
             maximumWriteValueLength: { pid, type in await actor.maximumWriteValueLength(peripheralID: pid, type: type) },
             notifications: { pid, cid in actor.notifications(peripheralID: pid, characteristicID: cid) },
             openL2CAPChannel: { pid, psm in try await actor.openL2CAPChannel(peripheralID: pid, psm: psm) },
-            events: { actor.eventStream() }
+            events: { actor.eventStream() },
+            canSendWriteWithoutResponse: { pid in await actor.canSendWriteWithoutResponse(peripheralID: pid) }
         )
     }
 }
@@ -164,6 +165,10 @@ final actor CentralActor {
             } else {
                 Task { await self?.handleDidFailOpenL2CAP(peripheralID: pid, nsError: nsError) }
             }
+        }
+        weakPeriphDelegate.onIsReadyToSendWriteWithoutResponse = { [weak self] peripheral in
+            nonisolated(unsafe) let p = peripheral
+            Task { await self?.handleIsReadyToSendWriteWithoutResponse(peripheral: p) }
         }
     }
 
@@ -333,6 +338,10 @@ final actor CentralActor {
     func maximumWriteValueLength(peripheralID: UUID, type: CBCharacteristicWriteType) -> Int {
         guard let connection = peripherals[peripheralID] else { return 0 }
         return connection.maximumWriteValueLength(for: type)
+    }
+
+    func canSendWriteWithoutResponse(peripheralID: UUID) -> Bool {
+        peripherals[peripheralID]?.canSendWriteWithoutResponse ?? false
     }
 
     func openL2CAPChannel(peripheralID: UUID, psm: UInt16) async throws -> L2CAPConnection {
@@ -539,6 +548,10 @@ final actor CentralActor {
         for key in characteristics.keys where key.hasPrefix(prefix) {
             characteristics.removeValue(forKey: key)
         }
+    }
+
+    private func handleIsReadyToSendWriteWithoutResponse(peripheral: any CBMPeripheral) {
+        emit(.isReadyToSendWriteWithoutResponse(Peripheral(peripheral)))
     }
 
     private func handleDidDiscoverServices(id: UUID, services: [Service], nsError: NSError?) {
