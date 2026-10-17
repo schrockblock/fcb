@@ -243,7 +243,8 @@ final actor CentralActor {
             throw BluetoothError.unknownPeripheral(id)
         }
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Peripheral, any Error>) in
-            pendingConnect[id] = cont
+            // A retry supersedes: the caller it replaces fails instead of leaking.
+            pendingConnect.updateValue(cont, forKey: id)?.resume(throwing: BluetoothError.operationCancelled)
             manager.connect(connection, options: options?.dictionary)
         }
     }
@@ -286,7 +287,7 @@ final actor CentralActor {
             throw BluetoothError.unknownPeripheral(peripheralID)
         }
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[Service], any Error>) in
-            pendingDiscoverServices[peripheralID] = cont
+            pendingDiscoverServices.updateValue(cont, forKey: peripheralID)?.resume(throwing: BluetoothError.operationCancelled)
             connection.discoverServices(serviceIDs)
         }
     }
@@ -301,7 +302,7 @@ final actor CentralActor {
         }
         let key = "\(peripheralID.uuidString):\(serviceID.uuidString)"
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<[Characteristic], any Error>) in
-            pendingDiscoverCharacteristics[key] = cont
+            pendingDiscoverCharacteristics.updateValue(cont, forKey: key)?.resume(throwing: BluetoothError.operationCancelled)
             connection.discoverCharacteristics(characteristicIDs, for: service)
         }
     }
@@ -328,7 +329,7 @@ final actor CentralActor {
             return
         }
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
-            pendingWrites[key] = cont
+            pendingWrites.updateValue(cont, forKey: key)?.resume(throwing: BluetoothError.operationCancelled)
             connection.writeValue(data, for: characteristic, type: .withResponse)
         }
     }
@@ -338,7 +339,7 @@ final actor CentralActor {
         let (connection, characteristic) = try resolve(peripheralID: peripheralID, characteristicID: characteristicID)
         let key = "\(peripheralID.uuidString):\(characteristicID.uuidString)"
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, any Error>) in
-            pendingNotify[key] = cont
+            pendingNotify.updateValue(cont, forKey: key)?.resume(throwing: BluetoothError.operationCancelled)
             connection.setNotifyValue(enabled, for: characteristic)
         }
     }
