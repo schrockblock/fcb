@@ -7,7 +7,16 @@ public struct BluetoothCentralClient: Sendable {
     public var state: @Sendable () -> AsyncStream<CBManagerState> = { .never }
     public var authorization: @Sendable () -> CBManagerAuthorization = { .notDetermined }
 
+    /// Scans for peripherals advertising `services`. One radio scan per central:
+    /// a newer `scan` supersedes this one and FINISHES this stream (its owner lost
+    /// the radio). The stream also finishes when Bluetooth leaves `.poweredOn`
+    /// (CoreBluetooth stops scanning and never resumes), and at once when the scan
+    /// is requested while not powered on. Terminating the stream — cancelling the
+    /// task iterating it, or dropping it — stops THIS scan only.
     public var scan: @Sendable (_ services: [CBUUID]?, _ options: ScanOptions?) -> AsyncStream<DiscoveredPeripheral> = { _, _ in .never }
+    /// Does nothing; kept for source compatibility. A global stop ended whatever
+    /// scan was current — another owner's included. Stop your own scan by
+    /// terminating its stream (cancel the task iterating it).
     public var stopScan: @Sendable () async -> Void
 
     public var connect: @Sendable (_ id: UUID, _ options: ConnectOptions?) async throws -> Peripheral

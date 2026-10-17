@@ -16,7 +16,8 @@ extension BluetoothCentralClient: DependencyKey {
             state: { actor.stateStream() },
             authorization: { CBManager.authorization },
             scan: { services, options in actor.scan(services: services, options: options) },
-            stopScan: { await actor.stopScan() },
+            // Does nothing: a scan stops when ITS stream terminates (see BluetoothCentralClient.stopScan).
+            stopScan: { },
             connect: { id, options in try await actor.connect(id: id, options: options) },
             disconnect: { id in try await actor.disconnect(id: id) },
             retrievePeripherals: { ids in await actor.retrievePeripherals(ids: ids) },
@@ -70,6 +71,12 @@ final actor CentralActor {
     /// Token identifying the current active scan. A stale `endScan(token:)` call
     /// from a superseded scan stream is ignored when its token no longer matches.
     private var currentScanToken: UUID?
+    /// Scans FCB itself ended (superseded by a newer scan, or Bluetooth left
+    /// `.poweredOn`) whose stream's `endScan` has not arrived yet.
+    private var retiredScanTokens: Set<UUID> = []
+    /// Scans whose stream terminated before their `startScan` ran (the two are
+    /// separate tasks and can reach the actor in either order).
+    private var scanTokensEndedBeforeStart: Set<UUID> = []
     private var notificationContinuations: [String: AsyncThrowingStream<Data, any Error>.Continuation] = [:]
 
     // Pending operation continuations
@@ -223,13 +230,6 @@ final actor CentralActor {
                 Task { await self.unregisterNotificationContinuation(key: key) }
             }
         }
-    }
-
-    func stopScan() async {
-        manager.stopScan()
-        scanContinuation?.finish()
-        scanContinuation = nil
-        currentScanToken = nil
     }
 
     func connect(id: UUID, options: ConnectOptions?) async throws -> Peripheral {
@@ -464,19 +464,49 @@ final actor CentralActor {
     }
 
     private func startScan(services: [CBUUID]?, options: ScanOptions?, continuation: AsyncStream<DiscoveredPeripheral>.Continuation, token: UUID) {
+        // The consumer already let go of this stream: never start a radio scan
+        // nobody owns.
+        if scanTokensEndedBeforeStart.remove(token) != nil {
+            continuation.finish()
+            return
+        }
+        // CoreBluetooth drops a scan issued while not powered on; a stream that
+        // can never yield ends at once instead of going quiet.
+        guard manager.state == .poweredOn else {
+            continuation.finish()
+            return
+        }
+        // One radio scan per central: the newer scan supersedes, and the older
+        // stream FINISHES so its owner can tell it lost the radio.
+        retireCurrentScan()
         scanContinuation = continuation
         currentScanToken = token
         manager.scanForPeripherals(withServices: services, options: options?.dictionary)
     }
 
-    /// Stops the scan and clears the continuation ONLY when the token matches
-    /// the current scan. A stale `endScan` from a superseded stream's
-    /// `onTermination` is ignored — it must not kill a newer active scan.
+    /// A scan stream terminated. Stops the radio ONLY when `token` is the
+    /// current scan; a superseded (retired) stream's late `endScan` is ignored,
+    /// and one that arrives before its own `startScan` is remembered so that
+    /// start never happens.
     private func endScan(token: UUID) {
-        guard currentScanToken == token else { return }
-        manager.stopScan()
+        if currentScanToken == token {
+            manager.stopScan()
+            scanContinuation = nil
+            currentScanToken = nil
+        } else if retiredScanTokens.remove(token) == nil {
+            scanTokensEndedBeforeStart.insert(token)
+        }
+    }
+
+    /// Finishes the current scan's stream without touching the radio (the
+    /// caller starts a newer scan, or CoreBluetooth already stopped scanning).
+    private func retireCurrentScan() {
+        guard let token = currentScanToken else { return }
+        let outgoing = scanContinuation
         scanContinuation = nil
         currentScanToken = nil
+        retiredScanTokens.insert(token)
+        outgoing?.finish()   // its onTermination → endScan(token) consumes the retired token
     }
 
     private func emit(_ event: CentralEvent) {
