@@ -519,6 +519,51 @@ final actor CentralActor {
         let bridged = CBManagerState(state)
         for cont in stateContinuations.values { cont.yield(bridged) }
         emit(.didUpdateState(bridged))
+        if let error = Self.adapterDownError(state) {
+            adapterWentDown(with: error)
+        }
+    }
+
+    /// The error pending operations fail with when Bluetooth is in `state`, or
+    /// `nil` for `.poweredOn`. `.resetting` and `.unknown` mean the stack is
+    /// gone too, so they fail as `.poweredOff`.
+    static func adapterDownError(_ state: CBMManagerState) -> BluetoothError? {
+        switch state {
+        case .poweredOn: return nil
+        case .unauthorized: return .unauthorized(CBManager.authorization)
+        case .unsupported: return .unsupported
+        case .poweredOff, .resetting, .unknown: return .poweredOff
+        }
+    }
+
+    /// Bluetooth left `.poweredOn`. CoreBluetooth reports this as a state
+    /// change only — no `didDisconnect`, no operation callbacks — and every
+    /// peripheral object obtained so far is invalid. Fail every pending
+    /// operation with `error`, end every notification stream and the scan
+    /// stream, release pending `disconnect` callers (the link is down), and
+    /// forget all peripherals and characteristics (retrieval or discovery
+    /// re-populates them after power-on). One line per kind of state, so each
+    /// can be reasoned about (and mutation-tested) on its own.
+    private func adapterWentDown(with error: BluetoothError) {
+        Self.drain(&pendingConnect) { $0.resume(throwing: error) }
+        Self.drain(&pendingDiscoverServices) { $0.resume(throwing: error) }
+        Self.drain(&pendingDiscoverCharacteristics) { $0.resume(throwing: error) }
+        Self.drain(&pendingReads) { $0.resume(throwing: error) }
+        Self.drain(&pendingWrites) { $0.resume(throwing: error) }
+        Self.drain(&pendingNotify) { $0.resume(throwing: error) }
+        Self.drain(&pendingOpenL2CAP) { $0.resume(throwing: error) }
+        Self.drain(&pendingDisconnect) { waiters in waiters.forEach { $0.resume() } }
+        Self.drain(&notificationContinuations) { $0.finish(throwing: error) }
+        retireCurrentScan()   // CoreBluetooth already stopped the radio scan
+        peripherals = [:]
+        characteristics = [:]
+    }
+
+    /// Empties `map`, then hands each removed value to `body`.
+    private static func drain<Key, Value>(_ map: inout [Key: Value], _ body: (Value) -> Void) {
+        let values = Array(map.values)
+        map = [:]
+        values.forEach(body)
     }
 
     private func recordDiscoveredPeripheral(peripheral: any CBMPeripheral, ad: AdvertisementData, rssi: Int) {
